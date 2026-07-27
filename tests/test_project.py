@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, call
 
 import pytest
 
+from ada_mcp.als.client import LSPError
 from ada_mcp.tools.project import (
     handle_call_hierarchy,
     handle_dependency_graph,
@@ -85,6 +86,7 @@ class TestProjectInfo:
         assert result["object_dir"] == str(project_root / "obj/debug")
         assert result["exec_dir"] == str(project_root / "bin/debug")
         assert result["main_units"] == ["main.adb", "tester.adb"]
+        assert result["complete"] is True
         assert mock_als_client.send_request.await_args_list == [
             call(
                 "workspace/executeCommand",
@@ -133,6 +135,54 @@ class TestProjectInfo:
                 "/nonexistent/project.gpr",
             )
         mock_als_client.send_request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_project_info_calibrates_als_project_load_failure(
+        self,
+        sample_gpr_path,
+        mock_als_client,
+    ):
+        """An ALS project-view failure must not expose its internal backtrace."""
+        mock_als_client.send_request.side_effect = LSPError(
+            -32603,
+            "Exception: raised CONSTRAINT_ERROR\n/internal/als/backtrace",
+        )
+
+        result = await handle_project_info(
+            mock_als_client,
+            str(sample_gpr_path),
+        )
+
+        assert result == {
+            "project_file": str(sample_gpr_path.resolve()),
+            "complete": False,
+            "error": (
+                "Ada Language Server could not evaluate the requested GPR "
+                "project. Ensure that imported GPR projects, generated project "
+                "files and required build dependencies are available."
+            ),
+            "reason": "project-load-failed",
+            "lsp_code": -32603,
+        }
+        assert "backtrace" not in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_project_info_preserves_transport_failure(
+        self,
+        sample_gpr_path,
+        mock_als_client,
+    ):
+        """A transport failure is not misreported as a broken GPR closure."""
+        mock_als_client.send_request.side_effect = LSPError(
+            -1,
+            "ALS connection closed",
+        )
+
+        with pytest.raises(LSPError, match="ALS connection closed"):
+            await handle_project_info(
+                mock_als_client,
+                str(sample_gpr_path),
+            )
 
 
 # ============================================================================

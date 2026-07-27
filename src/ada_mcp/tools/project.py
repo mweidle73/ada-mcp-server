@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ada_mcp.als.client import LSPError
+
 from ..utils.position import to_lsp_position
 from ..utils.uri import file_to_uri, uri_to_file
 
@@ -60,10 +62,25 @@ async def handle_project_info(als_client, gpr_file: str) -> dict[str, Any]:
     if not requested_project.is_file():
         raise FileNotFoundError(f"GPR project file does not exist: {requested_project}")
 
-    project_info = await _execute_als_command(
-        als_client,
-        "als-project-view-information",
-    )
+    try:
+        project_info = await _execute_als_command(
+            als_client,
+            "als-project-view-information",
+        )
+    except LSPError as error:
+        if error.code != -32603:
+            raise
+        return {
+            "project_file": str(requested_project),
+            "complete": False,
+            "error": (
+                "Ada Language Server could not evaluate the requested GPR "
+                "project. Ensure that imported GPR projects, generated project "
+                "files and required build dependencies are available."
+            ),
+            "reason": "project-load-failed",
+            "lsp_code": error.code,
+        }
     root_project_id = project_info.get("tree", {}).get("root-project", {}).get("id")
     root_project = next(
         (
@@ -91,6 +108,7 @@ async def handle_project_info(als_client, gpr_file: str) -> dict[str, Any]:
         "object_dir": root_project.get("object-directory"),
         "exec_dir": root_project.get("executable-directory"),
         "main_units": [Path(main).name for main in mains or []],
+        "complete": True,
     }
 
 
