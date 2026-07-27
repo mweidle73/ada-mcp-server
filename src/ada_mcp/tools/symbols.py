@@ -78,6 +78,15 @@ async def handle_workspace_symbols(
     Returns:
         Dict with matching symbols
     """
+    if not await client.wait_for_indexing():
+        return {
+            "symbols": [],
+            "count": 0,
+            "complete": False,
+            "error": "Ada Language Server project indexing did not complete",
+            "context": {"query": query, "kind": kind},
+        }
+
     try:
         result = await client.send_request(
             "workspace/symbol",
@@ -87,23 +96,35 @@ async def handle_workspace_symbols(
         logger.error(f"LSP error in workspace_symbols: {e}")
         return {
             "symbols": [],
+            "count": 0,
+            "complete": False,
             "error": e.message,
             "context": {"query": query, "kind": kind},
         }
 
     if not result:
-        return {"symbols": []}
+        return {
+            "symbols": [],
+            "count": 0,
+            "truncated": False,
+            "complete": True,
+        }
 
     # Filter by kind if specified
     kind_filter = _get_kind_filter(kind)
 
     symbols = []
+    truncated = False
     for item in result:
         symbol_kind = item.get("kind", 0)
 
         # Apply kind filter
         if kind_filter and symbol_kind not in kind_filter:
             continue
+
+        if len(symbols) >= limit:
+            truncated = True
+            break
 
         location = item.get("location", {})
         loc_uri = location.get("uri", "")
@@ -121,13 +142,11 @@ async def handle_workspace_symbols(
             }
         )
 
-        if len(symbols) >= limit:
-            break
-
     return {
         "symbols": symbols,
         "count": len(symbols),
-        "truncated": len(result) > limit if result else False,
+        "truncated": truncated,
+        "complete": True,
     }
 
 

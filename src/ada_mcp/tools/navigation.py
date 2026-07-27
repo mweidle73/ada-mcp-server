@@ -214,7 +214,14 @@ async def handle_type_definition(
         }
 
     if not result:
-        return {"found": False}
+        return {
+            "found": False,
+            "hint": (
+                "Place the cursor on an object or parameter identifier. "
+                "Use ada_goto_definition when the cursor is already on an "
+                "explicit type name."
+            ),
+        }
 
     # Handle both single location and array of locations
     if isinstance(result, list):

@@ -40,6 +40,14 @@ class ALSClient:
         self._diagnostic_generations: dict[str, int] = {}
         self._diagnostics_changed = asyncio.Condition()
 
+        # ALS reports project indexing through LSP work-done progress. Track
+        # those tokens so workspace-wide queries do not mistake a partial
+        # index for a complete empty result.
+        self._active_indexing_tokens: set[int | str] = set()
+        self._indexing_seen = False
+        self._indexing_generation = 0
+        self._indexing_changed = asyncio.Condition()
+
     @property
     def is_running(self) -> bool:
         """Check if ALS process is still running."""
@@ -254,6 +262,8 @@ class ALSClient:
 
             if method == "textDocument/publishDiagnostics":
                 await self._handle_diagnostics(params)
+            elif method == "$/progress":
+                await self._handle_progress(params)
             elif method == "window/logMessage":
                 self._handle_log_message(params)
             elif method == "window/showMessage":
@@ -276,6 +286,26 @@ class ALSClient:
             self._diagnostics_changed.notify_all()
 
         logger.debug(f"Received {len(diagnostics)} diagnostics for {uri}")
+
+    async def _handle_progress(self, params: dict[str, Any]) -> None:
+        """Track ALS project-indexing work-done progress."""
+        token = params.get("token")
+        value = params.get("value", {})
+        kind = value.get("kind")
+
+        if token is None or kind not in ("begin", "end"):
+            return
+
+        async with self._indexing_changed:
+            if kind == "begin" and value.get("title") == "Indexing":
+                self._indexing_seen = True
+                self._active_indexing_tokens.add(token)
+                self._indexing_generation += 1
+                self._indexing_changed.notify_all()
+            elif kind == "end" and token in self._active_indexing_tokens:
+                self._active_indexing_tokens.remove(token)
+                self._indexing_generation += 1
+                self._indexing_changed.notify_all()
 
     async def diagnostics_generation(self, uri: str) -> int:
         """Return the number of diagnostic publications seen for a URI."""
@@ -313,6 +343,35 @@ class ALSClient:
                 await asyncio.sleep(0.1)
                 async with self._diagnostics_changed:
                     if self._diagnostic_generations.get(uri, 0) == generation:
+                        return True
+
+                if loop.time() >= deadline:
+                    return False
+        except TimeoutError:
+            return False
+
+    async def wait_for_indexing(self, timeout: float = 25.0) -> bool:
+        """Wait until ALS has observed and completed project indexing."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        try:
+            while True:
+                async with self._indexing_changed:
+                    await asyncio.wait_for(
+                        self._indexing_changed.wait_for(
+                            lambda: self._indexing_seen and not self._active_indexing_tokens
+                        ),
+                        timeout=max(0.0, deadline - loop.time()),
+                    )
+                    generation = self._indexing_generation
+
+                # A server may start a second indexing phase immediately after
+                # ending the first. Require a short quiescent interval rather
+                # than exposing that gap as a completed workspace.
+                await asyncio.sleep(0.1)
+                async with self._indexing_changed:
+                    if generation == self._indexing_generation and not self._active_indexing_tokens:
                         return True
 
                 if loop.time() >= deadline:

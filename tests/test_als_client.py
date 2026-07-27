@@ -41,6 +41,42 @@ async def test_write_failure_removes_pending_request():
 
 
 @pytest.mark.asyncio
+async def test_indexing_waits_for_progress_end():
+    """Workspace readiness follows ALS work-done progress."""
+    process = MagicMock()
+    process.returncode = None
+    client = ALSClient(process)
+
+    await client._handle_progress(
+        {
+            "token": "index-1",
+            "value": {"kind": "begin", "title": "Indexing"},
+        }
+    )
+    waiter = asyncio.create_task(client.wait_for_indexing(timeout=0.5))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    await client._handle_progress(
+        {
+            "token": "index-1",
+            "value": {"kind": "end"},
+        }
+    )
+    assert await waiter is True
+
+
+@pytest.mark.asyncio
+async def test_indexing_without_progress_is_not_complete():
+    """An absent indexing signal cannot be reported as a complete index."""
+    process = MagicMock()
+    process.returncode = None
+    client = ALSClient(process)
+
+    assert await client.wait_for_indexing(timeout=0.01) is False
+
+
+@pytest.mark.asyncio
 async def test_diagnostic_publication_advances_generation():
     """Even an empty publication proves that ALS analyzed a document."""
     process = MagicMock()

@@ -329,7 +329,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="ada_diagnostics",
-            description="Get compiler errors and warnings for Ada files",
+            description=(
+                "Get synchronized compiler diagnostics for one Ada file, "
+                "or the explicitly incomplete cache of published diagnostics "
+                "when no file is provided"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -391,10 +395,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="ada_workspace_symbols",
-            description="Search for symbols by name across the entire Ada workspace",
+            description=("Search for symbols by name across the complete indexed Ada workspace"),
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path to an Ada file which selects the "
+                            "target project/workspace"
+                        ),
+                    },
                     "query": {
                         "type": "string",
                         "description": "Symbol name or pattern to search for",
@@ -411,12 +422,15 @@ async def list_tools() -> list[Tool]:
                         "default": 50,
                     },
                 },
-                "required": ["query"],
+                "required": ["file", "query"],
             },
         ),
         Tool(
             name="ada_type_definition",
-            description="Navigate to a symbol's type definition (where the type is declared)",
+            description=(
+                "Navigate from an object or parameter identifier to its type "
+                "declaration; use ada_goto_definition on an explicit type name"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {

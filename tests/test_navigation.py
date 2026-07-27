@@ -8,6 +8,7 @@ import pytest
 from ada_mcp.tools.navigation import (
     _ensure_file_open,
     clear_open_files_cache,
+    handle_type_definition,
 )
 
 
@@ -74,3 +75,24 @@ async def test_parallel_source_sync_sends_one_did_open(tmp_path):
 
     assert results == [True, False]
     client.send_notification.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_type_definition_explains_explicit_type_name_semantics(tmp_path):
+    """An empty type-definition result directs explicit types to definition."""
+    source = tmp_path / "sample.ads"
+    source.write_text("package Sample is end Sample;\n")
+    client = AsyncMock()
+    client.send_request.return_value = []
+    clear_open_files_cache()
+
+    result = await handle_type_definition(
+        client,
+        file=str(source),
+        line=1,
+        column=9,
+    )
+
+    assert result["found"] is False
+    assert "object or parameter identifier" in result["hint"]
+    assert "ada_goto_definition" in result["hint"]
