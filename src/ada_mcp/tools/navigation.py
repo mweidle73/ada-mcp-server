@@ -468,6 +468,21 @@ async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
         logger.debug(f"Updated file in ALS: {file_path}")
         return True
 
+    if client.is_new_project_source(path):
+        await client.send_notification(
+            "workspace/didChangeWatchedFiles",
+            {
+                "changes": [
+                    {
+                        "uri": file_uri,
+                        "type": 1,
+                    }
+                ]
+            },
+        )
+        client.remember_project_source(path)
+        logger.debug(f"Announced new project source to ALS: {file_path}")
+
     # Determine language ID
     suffix = path.suffix.lower()
     if suffix in (".ads", ".adb"):

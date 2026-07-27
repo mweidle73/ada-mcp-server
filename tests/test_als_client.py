@@ -136,3 +136,25 @@ async def test_diagnostic_wait_uses_last_publication():
     assert await waiter is True
     assert await client.diagnostics_generation(uri) == 2
     assert await client.get_diagnostics(uri) == {uri: []}
+
+
+def test_project_source_baseline_detects_new_sources(tmp_path):
+    """Only Ada sources created after startup and below the root are new."""
+    existing = tmp_path / "existing.ads"
+    existing.write_text("package Existing is end Existing;\n")
+    outside = tmp_path.parent / "outside.ads"
+    process = MagicMock()
+    process.returncode = None
+    client = ALSClient(process)
+
+    client.set_project_source_baseline(tmp_path)
+    created = tmp_path / "created.adb"
+    created.write_text("procedure Created is begin null; end Created;\n")
+
+    assert client.is_new_project_source(existing) is False
+    assert client.is_new_project_source(created) is True
+    assert client.is_new_project_source(outside) is False
+    assert client.is_new_project_source(tmp_path / "notes.txt") is False
+
+    client.remember_project_source(created)
+    assert client.is_new_project_source(created) is False

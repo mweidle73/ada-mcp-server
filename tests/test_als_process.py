@@ -37,6 +37,7 @@ async def test_start_als_configures_project_through_lsp(tmp_path):
         )
 
     assert result is client
+    client.set_project_source_baseline.assert_called_once_with(tmp_path)
     client.send_notification.assert_any_await(
         "workspace/didChangeConfiguration",
         {
@@ -47,6 +48,10 @@ async def test_start_als_configures_project_through_lsp(tmp_path):
             }
         },
     )
+    initialize_params = client.send_request.await_args_list[0].args[1]
+    assert initialize_params["capabilities"]["workspace"]["didChangeWatchedFiles"] == {
+        "dynamicRegistration": True,
+    }
 
 
 class TestALSHealthMonitor:

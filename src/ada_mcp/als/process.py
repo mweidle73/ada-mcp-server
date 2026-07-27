@@ -345,6 +345,9 @@ async def start_als(
             },
             "workspace": {
                 "workspaceFolders": True,
+                "didChangeWatchedFiles": {
+                    "dynamicRegistration": True,
+                },
                 "symbol": {
                     "dynamicRegistration": True,
                 },
@@ -425,6 +428,7 @@ async def start_als(
     client._project_root = project_root
     client._als_path = resolved_als_path
     client._gpr_file = gpr_file
+    client.set_project_source_baseline(project_root)
 
     return client
 

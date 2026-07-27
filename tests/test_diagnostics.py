@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ada_mcp.als.client import ALSClient
 from ada_mcp.tools.diagnostics import handle_diagnostics
 from ada_mcp.tools.navigation import clear_open_files_cache
 from ada_mcp.utils.uri import file_to_uri
@@ -12,7 +13,8 @@ from ada_mcp.utils.uri import file_to_uri
 
 def diagnostic_client() -> AsyncMock:
     """Create the protocol state used by the diagnostics handler."""
-    client = AsyncMock()
+    client = AsyncMock(spec=ALSClient)
+    client.is_new_project_source.return_value = False
     client.send_notification = AsyncMock()
     client.diagnostics_generation = AsyncMock(return_value=0)
     client.wait_for_diagnostics = AsyncMock(return_value=True)

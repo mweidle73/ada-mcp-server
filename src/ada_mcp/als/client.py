@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from ada_mcp.als.types import (
@@ -48,6 +49,13 @@ class ALSClient:
         self._indexing_generation = 0
         self._indexing_changed = asyncio.Condition()
 
+        # A source which appears below the project root after ALS starts needs
+        # a watched-files notification before didOpen. Existing sources are
+        # part of the initial project load and must not trigger a reload merely
+        # because an MCP tool opens them for the first time.
+        self._project_root: Path | None = None
+        self._known_project_sources: set[Path] = set()
+
     @property
     def is_running(self) -> bool:
         """Check if ALS process is still running."""
@@ -57,6 +65,32 @@ class ALSClient:
         """Start the background read loop."""
         if self._read_task is None:
             self._read_task = asyncio.create_task(self._read_loop())
+
+    def set_project_source_baseline(self, project_root: Path) -> None:
+        """Record Ada sources which exist before this ALS instance starts."""
+        resolved_root = project_root.resolve()
+        self._project_root = resolved_root
+        self._known_project_sources = {
+            source.resolve()
+            for pattern in ("*.ads", "*.adb")
+            for source in resolved_root.rglob(pattern)
+            if source.is_file()
+        }
+
+    def is_new_project_source(self, source: Path) -> bool:
+        """Return whether a source appeared below the project root since startup."""
+        if self._project_root is None or source.suffix.lower() not in (".ads", ".adb"):
+            return False
+
+        resolved_source = source.resolve()
+        if not resolved_source.is_relative_to(self._project_root):
+            return False
+
+        return resolved_source not in self._known_project_sources
+
+    def remember_project_source(self, source: Path) -> None:
+        """Include a successfully announced source in this ALS instance's baseline."""
+        self._known_project_sources.add(source.resolve())
 
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send LSP request and wait for response."""
