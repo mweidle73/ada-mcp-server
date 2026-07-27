@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from ada_mcp.als.client import ALSClient, LSPError
 from ada_mcp.utils.uri import file_to_uri, uri_to_file
@@ -396,15 +397,17 @@ async def handle_hover(
     }
 
 
-# Cache of open files to avoid reopening
-_open_files: set[str] = set()
+# Track open files per ALS client. A restarted server receives a new client and
+# must therefore see fresh didOpen notifications for every source it analyzes.
+_open_files: WeakKeyDictionary[ALSClient, set[str]] = WeakKeyDictionary()
 
 
 async def _ensure_file_open(client: ALSClient, file_path: str) -> None:
     """Ensure a file is open in ALS."""
     file_uri = file_to_uri(file_path)
+    client_open_files = _open_files.setdefault(client, set())
 
-    if file_uri in _open_files:
+    if file_uri in client_open_files:
         return
 
     path = Path(file_path)
@@ -433,7 +436,7 @@ async def _ensure_file_open(client: ALSClient, file_path: str) -> None:
                 }
             },
         )
-        _open_files.add(file_uri)
+        client_open_files.add(file_uri)
         logger.debug(f"Opened file in ALS: {file_path}")
     except Exception as e:
         logger.warning(f"Failed to open file in ALS: {e}")

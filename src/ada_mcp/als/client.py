@@ -68,14 +68,17 @@ class ALSClient:
         self._pending_requests[request_id] = future
 
         logger.debug(f"Sending request {request_id}: {method}")
-        await self._write_message(request)
 
         try:
+            await self._write_message(request)
             result = await asyncio.wait_for(future, timeout=30.0)
             return result
         except TimeoutError:
             self._pending_requests.pop(request_id, None)
             raise LSPError(-1, f"Request {method} timed out")
+        except Exception:
+            self._pending_requests.pop(request_id, None)
+            raise
 
     async def send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send LSP notification (no response expected)."""
@@ -124,6 +127,7 @@ class ALSClient:
         """Read responses and notifications from ALS stdout."""
         if self.process.stdout is None:
             logger.error("ALS stdout is not available")
+            self._fail_pending_requests("ALS stdout is not available")
             return
 
         try:
@@ -178,6 +182,17 @@ class ALSClient:
             logger.debug("Read loop cancelled")
         except Exception as e:
             logger.exception(f"Error in read loop: {e}")
+        finally:
+            self._fail_pending_requests("ALS connection closed")
+
+    def _fail_pending_requests(self, message: str) -> None:
+        """Fail requests which cannot receive a response from this ALS."""
+        pending = list(self._pending_requests.values())
+        self._pending_requests.clear()
+
+        for future in pending:
+            if not future.done():
+                future.set_exception(LSPError(-1, message))
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         """Handle incoming LSP message."""

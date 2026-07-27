@@ -240,7 +240,6 @@ async def handle_code_actions(
         },
         "context": {
             "diagnostics": diagnostics or [],
-            "only": None,  # Request all kinds of code actions
         },
     }
 

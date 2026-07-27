@@ -361,6 +361,7 @@ class TestCodeActions:
         call_args = mock_als_client.send_request.call_args
         assert call_args[0][1]["range"]["start"]["line"] == 4  # 0-based
         assert call_args[0][1]["range"]["end"]["line"] == 9  # 0-based
+        assert call_args[0][1]["context"] == {"diagnostics": []}
 
         assert result["count"] == 1
 
