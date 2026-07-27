@@ -805,6 +805,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             case "ada_project_info":
                 result = await handle_project_info(
+                    client,
                     gpr_file=arguments["gpr_file"],
                 )
 
@@ -890,7 +891,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 )
 
             case _:
-                result = {"error": f"Unknown tool: {name}", "available_tools": "Use list_tools to see available tools"}
+                result = {
+                    "error": f"Unknown tool: {name}",
+                    "available_tools": "Use list_tools to see available tools",
+                }
 
     except Exception as e:
         logger.exception(f"Error executing tool {name}: {e}")

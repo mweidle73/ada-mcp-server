@@ -383,6 +383,26 @@ async def start_als(
     # Send initialized notification
     await client.send_notification("initialized", {})
 
+    # Current ALS releases read project settings through the normal LSP
+    # configuration channel. Keep initializationOptions above for compatibility
+    # with older releases, but also configure the active server explicitly.
+    ada_settings: dict[str, str | bool] = {}
+    if gpr_file and gpr_file.exists():
+        resolved_root = project_root.resolve()
+        resolved_gpr = gpr_file.resolve()
+        try:
+            project_file = str(resolved_gpr.relative_to(resolved_root))
+        except ValueError:
+            project_file = str(resolved_gpr)
+        ada_settings["projectFile"] = project_file
+    else:
+        ada_settings["enableIndexing"] = False
+
+    await client.send_notification(
+        "workspace/didChangeConfiguration",
+        {"settings": {"ada": ada_settings}},
+    )
+
     # Open GPR file to trigger project loading and indexing
     if gpr_file and gpr_file.exists():
         logger.debug(f"Opening GPR file: {gpr_file}")

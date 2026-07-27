@@ -2,11 +2,51 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ada_mcp.als.process import ALSHealthMonitor
+from ada_mcp.als.process import ALSHealthMonitor, start_als
+
+
+@pytest.mark.asyncio
+async def test_start_als_configures_project_through_lsp(tmp_path):
+    """Test that current ALS receives the project through LSP settings."""
+    gpr_file = tmp_path / "sample.gpr"
+    gpr_file.write_text("project Sample is end Sample;\n")
+    process = MagicMock()
+    client = MagicMock()
+    client.send_request = AsyncMock(return_value={"capabilities": {}})
+    client.send_notification = AsyncMock()
+
+    with (
+        patch(
+            "ada_mcp.als.process.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ),
+        patch("ada_mcp.als.process.ALSClient", return_value=client),
+        patch(
+            "ada_mcp.als.process.asyncio.sleep",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await start_als(
+            tmp_path,
+            als_path="/test/ada_language_server",
+            gpr_file=gpr_file,
+        )
+
+    assert result is client
+    client.send_notification.assert_any_await(
+        "workspace/didChangeConfiguration",
+        {
+            "settings": {
+                "ada": {
+                    "projectFile": "sample.gpr",
+                }
+            }
+        },
+    )
 
 
 class TestALSHealthMonitor:

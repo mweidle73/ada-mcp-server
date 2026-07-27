@@ -36,112 +36,61 @@ def _to_dict(obj: Any) -> Any:
         return obj
 
 
-def parse_gpr_file(gpr_path: str | Path) -> dict[str, Any]:
-    """Parse a GPR file to extract project information.
-
-    Args:
-        gpr_path: Path to the .gpr file
-
-    Returns:
-        Dictionary with:
-        - project_name: Name of the project
-        - source_dirs: List of source directories
-        - object_dir: Object directory
-        - exec_dir: Executable directory
-        - main_units: List of main units
-    """
-    gpr_path = Path(gpr_path)
-    if not gpr_path.exists():
-        return {
-            "project_name": None,
-            "source_dirs": [],
-            "object_dir": None,
-            "exec_dir": None,
-            "main_units": [],
-        }
-
-    content = gpr_path.read_text()
-
-    # Extract project name: project ProjectName is
-    project_match = re.search(r"project\s+(\w+)\s+is", content, re.IGNORECASE)
-    project_name = project_match.group(1) if project_match else None
-
-    # Extract source directories: for Source_Dirs use ("src", "other");
-    source_dirs = []
-    source_pattern = r"for\s+Source_Dirs\s+use\s*\((.*?)\);"
-    source_match = re.search(source_pattern, content, re.IGNORECASE | re.DOTALL)
-    if source_match:
-        dirs_str = source_match.group(1)
-        # Find all quoted strings
-        source_dirs = re.findall(r'"([^"]+)"', dirs_str)
-
-    # Extract object directory: for Object_Dir use "obj";
-    object_dir = None
-    obj_match = re.search(r'for\s+Object_Dir\s+use\s*"([^"]+)";', content, re.IGNORECASE)
-    if obj_match:
-        object_dir = obj_match.group(1)
-
-    # Extract exec directory: for Exec_Dir use "bin";
-    exec_dir = None
-    exec_match = re.search(r'for\s+Exec_Dir\s+use\s*"([^"]+)";', content, re.IGNORECASE)
-    if exec_match:
-        exec_dir = exec_match.group(1)
-
-    # Extract main units: for Main use ("main.adb", "test.adb");
-    main_units = []
-    main_pattern = r"for\s+Main\s+use\s*\((.*?)\);"
-    main_match = re.search(main_pattern, content, re.IGNORECASE | re.DOTALL)
-    if main_match:
-        mains_str = main_match.group(1)
-        main_units = re.findall(r'"([^"]+)"', mains_str)
-
-    return {
-        "project_name": project_name,
-        "source_dirs": source_dirs,
-        "object_dir": object_dir,
-        "exec_dir": exec_dir,
-        "main_units": main_units,
-    }
+async def _execute_als_command(als_client, command: str) -> Any:
+    """Execute one of ALS's structured project-information commands."""
+    return _to_dict(
+        await als_client.send_request(
+            "workspace/executeCommand",
+            {"command": command, "arguments": []},
+        )
+    )
 
 
-async def handle_project_info(gpr_file: str) -> dict[str, Any]:
+async def handle_project_info(als_client, gpr_file: str) -> dict[str, Any]:
     """Handle ada_project_info tool request.
 
     Args:
+        als_client: Initialized ALS client for the requested project
         gpr_file: Path to the .gpr project file
 
     Returns:
-        Project information dictionary
+        Project information evaluated by ALS/GPR
     """
-    gpr_path = Path(gpr_file)
-    info = parse_gpr_file(gpr_path)
+    requested_project = Path(gpr_file).resolve()
+    if not requested_project.is_file():
+        raise FileNotFoundError(f"GPR project file does not exist: {requested_project}")
 
-    # Convert relative paths to absolute
-    base_dir = gpr_path.parent
+    project_info = await _execute_als_command(
+        als_client,
+        "als-project-view-information",
+    )
+    root_project_id = project_info.get("tree", {}).get("root-project", {}).get("id")
+    root_project = next(
+        (
+            item.get("project")
+            for item in project_info.get("projects", [])
+            if item.get("project", {}).get("id") == root_project_id
+        ),
+        None,
+    )
+    if not root_project:
+        raise RuntimeError("ALS did not return the root project view")
 
-    # Make source directories absolute
-    absolute_source_dirs = []
-    for src_dir in info["source_dirs"]:
-        abs_path = (base_dir / src_dir).resolve()
-        absolute_source_dirs.append(str(abs_path))
+    loaded_project = Path(root_project.get("file-name", "")).resolve()
+    if loaded_project != requested_project:
+        raise RuntimeError(
+            f"ALS loaded a different project: {loaded_project} instead of {requested_project}"
+        )
 
-    # Build object_dir path
-    object_dir_str = None
-    if info["object_dir"]:
-        object_dir_str = str((base_dir / info["object_dir"]).resolve())
-
-    # Build exec_dir path
-    exec_dir_str = None
-    if info["exec_dir"]:
-        exec_dir_str = str((base_dir / info["exec_dir"]).resolve())
+    mains = await _execute_als_command(als_client, "als-mains")
 
     return {
-        "project_file": str(gpr_path.resolve()),
-        "project_name": info["project_name"],
-        "source_dirs": absolute_source_dirs,
-        "object_dir": object_dir_str,
-        "exec_dir": exec_dir_str,
-        "main_units": info["main_units"],
+        "project_file": str(loaded_project),
+        "project_name": root_project.get("name"),
+        "source_dirs": root_project.get("source-directories", []),
+        "object_dir": root_project.get("object-directory"),
+        "exec_dir": root_project.get("executable-directory"),
+        "main_units": [Path(main).name for main in mains or []],
     }
 
 
