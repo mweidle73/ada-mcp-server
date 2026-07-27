@@ -38,3 +38,65 @@ async def test_write_failure_removes_pending_request():
         await client.send_request("test/request")
 
     assert client._pending_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_publication_advances_generation():
+    """Even an empty publication proves that ALS analyzed a document."""
+    process = MagicMock()
+    process.returncode = None
+    client = ALSClient(process)
+    uri = "file:///tmp/sample.ads"
+    waiter = asyncio.create_task(
+        client.wait_for_diagnostics(uri, after_generation=0, timeout=0.5)
+    )
+    await asyncio.sleep(0)
+
+    await client._handle_diagnostics(
+        {
+            "uri": uri,
+            "diagnostics": [],
+        }
+    )
+
+    assert await waiter is True
+    assert await client.diagnostics_generation(uri) == 1
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_wait_uses_last_publication():
+    """A duplicate intermediate publication does not expose stale state."""
+    process = MagicMock()
+    process.returncode = None
+    client = ALSClient(process)
+    uri = "file:///tmp/sample.ads"
+    waiter = asyncio.create_task(
+        client.wait_for_diagnostics(uri, after_generation=0, timeout=0.5)
+    )
+
+    await client._handle_diagnostics(
+        {
+            "uri": uri,
+            "diagnostics": [
+                {
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1},
+                    },
+                    "message": "stale",
+                }
+            ],
+        }
+    )
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    await client._handle_diagnostics(
+        {
+            "uri": uri,
+            "diagnostics": [],
+        }
+    )
+
+    assert await waiter is True
+    assert await client.diagnostics_generation(uri) == 2
+    assert await client.get_diagnostics(uri) == {uri: []}

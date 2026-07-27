@@ -37,6 +37,8 @@ class ALSClient:
         # Diagnostics are pushed via notifications, store them here
         self._diagnostics: dict[str, list[Diagnostic]] = {}
         self._diagnostics_lock = asyncio.Lock()
+        self._diagnostic_generations: dict[str, int] = {}
+        self._diagnostics_changed = asyncio.Condition()
 
     @property
     def is_running(self) -> bool:
@@ -269,7 +271,54 @@ class ALSClient:
         async with self._diagnostics_lock:
             self._diagnostics[uri] = diagnostics
 
+        async with self._diagnostics_changed:
+            self._diagnostic_generations[uri] = self._diagnostic_generations.get(uri, 0) + 1
+            self._diagnostics_changed.notify_all()
+
         logger.debug(f"Received {len(diagnostics)} diagnostics for {uri}")
+
+    async def diagnostics_generation(self, uri: str) -> int:
+        """Return the number of diagnostic publications seen for a URI."""
+        async with self._diagnostics_changed:
+            return self._diagnostic_generations.get(uri, 0)
+
+    async def wait_for_diagnostics(
+        self,
+        uri: str,
+        after_generation: int,
+        timeout: float = 5.0,
+    ) -> bool:
+        """
+        Wait for a quiescent diagnostic publication after a known generation.
+
+        The pinned ALS does not attach document versions and may publish an
+        intermediate result for the previous text after didChange. Wait until
+        the publication generation remains stable briefly so callers receive
+        the final result for the synchronized text.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        try:
+            while True:
+                async with self._diagnostics_changed:
+                    await asyncio.wait_for(
+                        self._diagnostics_changed.wait_for(
+                            lambda: self._diagnostic_generations.get(uri, 0) > after_generation
+                        ),
+                        timeout=max(0.0, deadline - loop.time()),
+                    )
+                    generation = self._diagnostic_generations[uri]
+
+                await asyncio.sleep(0.1)
+                async with self._diagnostics_changed:
+                    if self._diagnostic_generations.get(uri, 0) == generation:
+                        return True
+
+                if loop.time() >= deadline:
+                    return False
+        except TimeoutError:
+            return False
 
     def _handle_log_message(self, params: dict[str, Any]) -> None:
         """Handle window/logMessage notification."""

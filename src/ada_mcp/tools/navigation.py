@@ -1,6 +1,8 @@
 """Navigation tools: goto definition, find references, hover."""
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -397,23 +399,67 @@ async def handle_hover(
     }
 
 
+@dataclass
+class _OpenFile:
+    """Text and LSP version last synchronized with one ALS client."""
+
+    text: str
+    version: int
+
+
 # Track open files per ALS client. A restarted server receives a new client and
 # must therefore see fresh didOpen notifications for every source it analyzes.
-_open_files: WeakKeyDictionary[ALSClient, set[str]] = WeakKeyDictionary()
+_open_files: WeakKeyDictionary[ALSClient, dict[str, _OpenFile]] = WeakKeyDictionary()
+_open_file_locks: WeakKeyDictionary[ALSClient, asyncio.Lock] = WeakKeyDictionary()
 
 
-async def _ensure_file_open(client: ALSClient, file_path: str) -> None:
-    """Ensure a file is open in ALS."""
+async def _ensure_file_open(client: ALSClient, file_path: str) -> bool | None:
+    """
+    Synchronize a file with ALS.
+
+    Returns True when didOpen or didChange was sent, False when the server
+    already has the current text and None when the path does not exist.
+    """
+    # MCP dispatches tool calls concurrently. Keep the LSP document lifecycle
+    # atomic per ALS client without serializing the semantic requests which
+    # follow this short synchronization step.
+    client_lock = _open_file_locks.setdefault(client, asyncio.Lock())
+    async with client_lock:
+        return await _synchronize_file(client, file_path)
+
+
+async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
+    """Synchronize one file while holding its ALS client's document lock."""
     file_uri = file_to_uri(file_path)
-    client_open_files = _open_files.setdefault(client, set())
-
-    if file_uri in client_open_files:
-        return
+    client_open_files = _open_files.setdefault(client, {})
 
     path = Path(file_path)
     if not path.exists():
         logger.warning(f"File not found: {file_path}")
-        return
+        return None
+
+    text = path.read_text()
+    open_file = client_open_files.get(file_uri)
+    if open_file is not None:
+        if open_file.text == text:
+            return False
+
+        version = open_file.version + 1
+        await client.send_notification(
+            "textDocument/didChange",
+            {
+                "textDocument": {
+                    "uri": file_uri,
+                    "version": version,
+                },
+                # A change without a range replaces the complete document and
+                # is valid for ALS's incremental synchronization capability.
+                "contentChanges": [{"text": text}],
+            },
+        )
+        client_open_files[file_uri] = _OpenFile(text=text, version=version)
+        logger.debug(f"Updated file in ALS: {file_path}")
+        return True
 
     # Determine language ID
     suffix = path.suffix.lower()
@@ -424,22 +470,20 @@ async def _ensure_file_open(client: ALSClient, file_path: str) -> None:
     else:
         language_id = "ada"  # Default
 
-    try:
-        await client.send_notification(
-            "textDocument/didOpen",
-            {
-                "textDocument": {
-                    "uri": file_uri,
-                    "languageId": language_id,
-                    "version": 1,
-                    "text": path.read_text(),
-                }
-            },
-        )
-        client_open_files.add(file_uri)
-        logger.debug(f"Opened file in ALS: {file_path}")
-    except Exception as e:
-        logger.warning(f"Failed to open file in ALS: {e}")
+    await client.send_notification(
+        "textDocument/didOpen",
+        {
+            "textDocument": {
+                "uri": file_uri,
+                "languageId": language_id,
+                "version": 1,
+                "text": text,
+            }
+        },
+    )
+    client_open_files[file_uri] = _OpenFile(text=text, version=1)
+    logger.debug(f"Opened file in ALS: {file_path}")
+    return True
 
 
 async def _get_line_preview(file_path: str, line_0based: int) -> str:
@@ -460,3 +504,4 @@ async def _get_line_preview(file_path: str, line_0based: int) -> str:
 def clear_open_files_cache() -> None:
     """Clear the open files cache (useful for testing)."""
     _open_files.clear()
+    _open_file_locks.clear()

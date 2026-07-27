@@ -26,13 +26,49 @@ async def handle_diagnostics(
     Returns:
         Dict with diagnostics list and counts
     """
-    # Get diagnostics from client's cache (populated via notifications)
+    complete = False
+    scope = "published-cache"
+
+    if file:
+        from ada_mcp.tools.navigation import _ensure_file_open
+
+        file_uri = file_to_uri(file)
+        generation = await client.diagnostics_generation(file_uri)
+        synchronized = await _ensure_file_open(client, file)
+
+        if synchronized is None:
+            return _unavailable_result(
+                scope="file",
+                message=f"File not found: {file}",
+            )
+
+        # An empty diagnostic publication is meaningful only after ALS has
+        # analyzed this exact text. didOpen/didChange triggers that publication;
+        # an already synchronized file may have a cached publication.
+        if synchronized or generation == 0:
+            published = await client.wait_for_diagnostics(
+                file_uri,
+                after_generation=generation,
+            )
+            if not published:
+                return _unavailable_result(
+                    scope="file",
+                    message=(
+                        "Ada Language Server did not publish diagnostics for the synchronized file"
+                    ),
+                )
+
+        complete = True
+        scope = "file"
+
+    # Get diagnostics from client's cache (populated via notifications).
+    # Without a file argument ALS does not provide a project-completeness
+    # signal, so the result is explicitly described as a published cache.
     async with client._diagnostics_lock:
         all_diagnostics = dict(client._diagnostics)
 
     # Filter by file if specified
     if file:
-        file_uri = file_to_uri(file)
         all_diagnostics = {uri: diags for uri, diags in all_diagnostics.items() if uri == file_uri}
 
     # Map severity filter to LSP severity values
@@ -82,6 +118,22 @@ async def handle_diagnostics(
         "warningCount": warning_count,
         "hintCount": hint_count,
         "totalCount": len(result_diagnostics),
+        "complete": complete,
+        "scope": scope,
+    }
+
+
+def _unavailable_result(scope: str, message: str) -> dict[str, Any]:
+    """Return a diagnostic result which cannot be mistaken for a clean file."""
+    return {
+        "diagnostics": [],
+        "errorCount": 0,
+        "warningCount": 0,
+        "hintCount": 0,
+        "totalCount": 0,
+        "complete": False,
+        "scope": scope,
+        "error": message,
     }
 
 
