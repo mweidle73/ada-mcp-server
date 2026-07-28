@@ -425,6 +425,13 @@ def _open_file_paths(client: ALSClient) -> list[str]:
     return sorted(uri_to_file(uri) for uri in _open_files.get(client, {}))
 
 
+async def _prune_deleted_open_files(client: ALSClient) -> None:
+    """Close and announce open sources which disappeared from the filesystem."""
+    for file_path in _open_file_paths(client):
+        if not Path(file_path).exists():
+            await _ensure_file_open(client, file_path)
+
+
 async def _ensure_file_open(client: ALSClient, file_path: str) -> bool | None:
     """
     Synchronize a file with ALS.
@@ -447,6 +454,62 @@ async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
 
     path = Path(file_path)
     if not path.exists():
+        open_file = client_open_files.pop(file_uri, None)
+        is_known_source = client.is_known_project_source(path)
+        if open_file is not None:
+            await client.send_notification(
+                "textDocument/didClose",
+                {
+                    "textDocument": {
+                        "uri": file_uri,
+                    }
+                },
+            )
+
+        if open_file is not None or is_known_source:
+            indexing_generation = await client.indexing_generation()
+            await client.send_notification(
+                "workspace/didDeleteFiles",
+                {
+                    "files": [
+                        {
+                            "uri": file_uri,
+                        }
+                    ]
+                },
+            )
+            await client.send_notification(
+                "workspace/didChangeWatchedFiles",
+                {
+                    "changes": [
+                        {
+                            "uri": file_uri,
+                            "type": 3,
+                        }
+                    ]
+                },
+            )
+            # The file-operation notification schedules a project reload, but
+            # its indexing progress is not a processing barrier for the
+            # watched-file notification queued behind it. ALS's reload command
+            # is a fence job and therefore makes both notifications visible
+            # before the final index generation is accepted.
+            await client.send_request(
+                "workspace/executeCommand",
+                {
+                    "command": "als-reload-project",
+                    "arguments": [],
+                },
+            )
+            client.forget_project_source(path)
+            if not await client.wait_for_indexing(
+                after_generation=indexing_generation,
+            ):
+                raise LSPError(
+                    -1,
+                    f"Ada Language Server did not finish removing project source: {file_path}",
+                )
+
         logger.warning(f"File not found: {file_path}")
         return None
 
@@ -473,7 +536,22 @@ async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
         logger.debug(f"Updated file in ALS: {file_path}")
         return True
 
-    if client.is_new_project_source(path):
+    project_source_created = client.is_new_project_source(path)
+    if project_source_created:
+        indexing_generation = await client.indexing_generation()
+        # ALS explicitly reloads its Libadalang contexts for file-operation
+        # notifications. A watched-file event alone only updates the current
+        # context incrementally and leaves cross-unit name resolution stale.
+        await client.send_notification(
+            "workspace/didCreateFiles",
+            {
+                "files": [
+                    {
+                        "uri": file_uri,
+                    }
+                ]
+            },
+        )
         await client.send_notification(
             "workspace/didChangeWatchedFiles",
             {
@@ -483,6 +561,13 @@ async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
                         "type": 1,
                     }
                 ]
+            },
+        )
+        await client.send_request(
+            "workspace/executeCommand",
+            {
+                "command": "als-reload-project",
+                "arguments": [],
             },
         )
         client.remember_project_source(path)
@@ -510,6 +595,16 @@ async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
     )
     client_open_files[file_uri] = _OpenFile(text=text, version=1)
     logger.debug(f"Opened file in ALS: {file_path}")
+
+    if project_source_created:
+        if not await client.wait_for_indexing(
+            after_generation=indexing_generation,
+        ):
+            raise LSPError(
+                -1,
+                f"Ada Language Server did not finish loading project source: {file_path}",
+            )
+
     return True
 
 

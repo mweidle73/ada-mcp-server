@@ -67,6 +67,51 @@ async def test_indexing_waits_for_progress_end():
 
 
 @pytest.mark.asyncio
+async def test_indexing_waits_for_generation_after_project_reload():
+    """A project refresh must not reuse the completed initial index."""
+    process = MagicMock()
+    process.returncode = None
+    client = ALSClient(process)
+
+    await client._handle_progress(
+        {
+            "token": "initial-index",
+            "value": {"kind": "begin", "title": "Indexing"},
+        }
+    )
+    await client._handle_progress(
+        {
+            "token": "initial-index",
+            "value": {"kind": "end"},
+        }
+    )
+    generation = await client.indexing_generation()
+    waiter = asyncio.create_task(
+        client.wait_for_indexing(
+            timeout=0.5,
+            after_generation=generation,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    await client._handle_progress(
+        {
+            "token": "reload-index",
+            "value": {"kind": "begin", "title": "Indexing"},
+        }
+    )
+    await client._handle_progress(
+        {
+            "token": "reload-index",
+            "value": {"kind": "end"},
+        }
+    )
+
+    assert await waiter is True
+
+
+@pytest.mark.asyncio
 async def test_indexing_without_progress_is_not_complete():
     """An absent indexing signal cannot be reported as a complete index."""
     process = MagicMock()

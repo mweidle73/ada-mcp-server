@@ -87,18 +87,30 @@ async def test_parallel_source_sync_sends_one_did_open(tmp_path):
 
 @pytest.mark.asyncio
 async def test_new_project_source_is_announced_before_did_open(tmp_path):
-    """A source created after ALS startup triggers one project refresh."""
+    """A source created after ALS startup triggers one full project refresh."""
     source = tmp_path / "created.ads"
     source.write_text("package Created is end Created;\n")
     client = _mock_client()
     client.is_new_project_source = MagicMock(return_value=True)
     client.remember_project_source = MagicMock()
+    client.indexing_generation.return_value = 7
+    client.wait_for_indexing.return_value = True
     clear_open_files_cache()
 
     assert await _ensure_file_open(client, str(source)) is True
     assert await _ensure_file_open(client, str(source)) is False
 
     assert client.send_notification.await_args_list[0].args == (
+        "workspace/didCreateFiles",
+        {
+            "files": [
+                {
+                    "uri": source.resolve().as_uri(),
+                }
+            ]
+        },
+    )
+    assert client.send_notification.await_args_list[1].args == (
         "workspace/didChangeWatchedFiles",
         {
             "changes": [
@@ -109,8 +121,72 @@ async def test_new_project_source_is_announced_before_did_open(tmp_path):
             ]
         },
     )
-    assert client.send_notification.await_args_list[1].args[0] == "textDocument/didOpen"
+    assert client.send_notification.await_args_list[2].args[0] == "textDocument/didOpen"
+    client.send_request.assert_awaited_once_with(
+        "workspace/executeCommand",
+        {
+            "command": "als-reload-project",
+            "arguments": [],
+        },
+    )
     client.remember_project_source.assert_called_once_with(source)
+    client.wait_for_indexing.assert_awaited_once_with(after_generation=7)
+
+
+@pytest.mark.asyncio
+async def test_deleted_open_source_is_closed_and_announced(tmp_path):
+    """Deleting an open source closes it before refreshing the project."""
+    source = tmp_path / "deleted.ads"
+    source.write_text("package Deleted is end Deleted;\n")
+    client = _mock_client()
+    client.is_known_project_source = MagicMock(return_value=True)
+    client.forget_project_source = MagicMock()
+    client.indexing_generation.return_value = 11
+    client.wait_for_indexing.return_value = True
+    clear_open_files_cache()
+
+    assert await _ensure_file_open(client, str(source)) is True
+    source.unlink()
+    assert await _ensure_file_open(client, str(source)) is None
+
+    assert client.send_notification.await_args_list[1].args == (
+        "textDocument/didClose",
+        {
+            "textDocument": {
+                "uri": source.resolve().as_uri(),
+            }
+        },
+    )
+    assert client.send_notification.await_args_list[2].args == (
+        "workspace/didDeleteFiles",
+        {
+            "files": [
+                {
+                    "uri": source.resolve().as_uri(),
+                }
+            ]
+        },
+    )
+    assert client.send_notification.await_args_list[3].args == (
+        "workspace/didChangeWatchedFiles",
+        {
+            "changes": [
+                {
+                    "uri": source.resolve().as_uri(),
+                    "type": 3,
+                }
+            ]
+        },
+    )
+    client.send_request.assert_awaited_once_with(
+        "workspace/executeCommand",
+        {
+            "command": "als-reload-project",
+            "arguments": [],
+        },
+    )
+    client.forget_project_source.assert_called_once_with(source)
+    client.wait_for_indexing.assert_awaited_once_with(after_generation=11)
 
 
 @pytest.mark.asyncio

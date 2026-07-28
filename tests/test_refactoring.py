@@ -27,7 +27,9 @@ def mock_als_client():
     client.send_request = AsyncMock()
     client.send_notification = AsyncMock()
     client.is_new_project_source = MagicMock(return_value=False)
+    client.is_known_project_source = MagicMock(return_value=False)
     client.remember_project_source = MagicMock()
+    client.forget_project_source = MagicMock()
     return client
 
 

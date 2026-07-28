@@ -1,14 +1,25 @@
 """Symbol tools: document symbols and workspace symbol search."""
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from ada_mcp.als.client import ALSClient, LSPError
 from ada_mcp.als.types import SymbolKind
-from ada_mcp.tools.navigation import _ensure_file_open, _open_file_paths
+from ada_mcp.tools.navigation import (
+    _ensure_file_open,
+    _open_file_paths,
+    _prune_deleted_open_files,
+)
 from ada_mcp.utils.uri import file_to_uri, uri_to_file
 
 logger = logging.getLogger(__name__)
+
+
+def _workspace_symbol_source_exists(item: dict[str, Any]) -> bool:
+    """Reject stale ALS index entries whose source has been deleted."""
+    uri = item.get("location", {}).get("uri")
+    return not isinstance(uri, str) or Path(uri_to_file(uri)).exists()
 
 
 async def handle_document_symbols(
@@ -27,7 +38,14 @@ async def handle_document_symbols(
     """
     file_uri = file_to_uri(file)
 
-    await _ensure_file_open(client, file)
+    synchronized = await _ensure_file_open(client, file)
+    if synchronized is None:
+        return {
+            "symbols": [],
+            "complete": False,
+            "error": f"File not found: {file}",
+            "context": {"file": file},
+        }
 
     try:
         result = await client.send_request(
@@ -76,6 +94,8 @@ async def handle_workspace_symbols(
     Returns:
         Dict with matching symbols
     """
+    await _prune_deleted_open_files(client)
+
     if not await client.wait_for_indexing():
         return {
             "symbols": [],
@@ -104,7 +124,8 @@ async def handle_workspace_symbols(
     candidates = [
         _convert_symbol_information(item)
         for item in workspace_result or []
-        if not kind_filter or item.get("kind", 0) in kind_filter
+        if _workspace_symbol_source_exists(item)
+        and (not kind_filter or item.get("kind", 0) in kind_filter)
     ]
 
     # The pinned ALS removes open documents from workspace/symbol results.
@@ -147,6 +168,14 @@ async def handle_workspace_symbols(
     symbols = []
     seen = set()
     for symbol in candidates:
+        # ALS may retain a deleted source in its workspace index even after a
+        # project reload, and a concurrent deletion can also occur after the
+        # raw-result filter above. Apply the filesystem boundary to the merged
+        # workspace and live-document candidates as the final completeness
+        # check.
+        if symbol["file"] and not Path(symbol["file"]).exists():
+            continue
+
         identity = (
             symbol["name"],
             symbol["kind"],

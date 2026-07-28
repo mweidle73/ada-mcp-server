@@ -92,6 +92,14 @@ class ALSClient:
         """Include a successfully announced source in this ALS instance's baseline."""
         self._known_project_sources.add(source.resolve())
 
+    def is_known_project_source(self, source: Path) -> bool:
+        """Return whether a source belongs to this ALS instance's baseline."""
+        return source.resolve() in self._known_project_sources
+
+    def forget_project_source(self, source: Path) -> None:
+        """Remove a deleted source from this ALS instance's baseline."""
+        self._known_project_sources.discard(source.resolve())
+
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send LSP request and wait for response."""
         if not self.is_running:
@@ -384,8 +392,17 @@ class ALSClient:
         except TimeoutError:
             return False
 
-    async def wait_for_indexing(self, timeout: float = 25.0) -> bool:
-        """Wait until ALS has observed and completed project indexing."""
+    async def indexing_generation(self) -> int:
+        """Return the current ALS project-indexing progress generation."""
+        async with self._indexing_changed:
+            return self._indexing_generation
+
+    async def wait_for_indexing(
+        self,
+        timeout: float = 25.0,
+        after_generation: int | None = None,
+    ) -> bool:
+        """Wait until ALS has observed and completed the requested indexing."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
@@ -394,7 +411,14 @@ class ALSClient:
                 async with self._indexing_changed:
                     await asyncio.wait_for(
                         self._indexing_changed.wait_for(
-                            lambda: self._indexing_seen and not self._active_indexing_tokens
+                            lambda: (
+                                self._indexing_seen
+                                and not self._active_indexing_tokens
+                                and (
+                                    after_generation is None
+                                    or self._indexing_generation > after_generation
+                                )
+                            )
                         ),
                         timeout=max(0.0, deadline - loop.time()),
                     )
