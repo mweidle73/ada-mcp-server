@@ -1,6 +1,6 @@
 """Tests for workspace symbol indexing state."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -82,3 +82,71 @@ async def test_workspace_symbol_truncation_detects_extra_filtered_match():
 
     assert result["count"] == 2
     assert result["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_symbols_include_open_documents():
+    """Opening both Ada units must not hide their workspace symbols."""
+    client = AsyncMock()
+    client.wait_for_indexing.return_value = True
+    client.send_request.side_effect = [
+        [],
+        [
+            {
+                "name": "Crypto",
+                "kind": SymbolKind.PACKAGE,
+                "range": {"start": {"line": 0, "character": 0}},
+                "selectionRange": {"start": {"line": 0, "character": 8}},
+                "children": [
+                    {
+                        "name": "Get_File_Hash",
+                        "kind": SymbolKind.FUNCTION,
+                        "range": {"start": {"line": 21, "character": 3}},
+                        "selectionRange": {"start": {"line": 21, "character": 12}},
+                    }
+                ],
+            }
+        ],
+        [
+            {
+                "name": "Get_File_Hash",
+                "kind": SymbolKind.FUNCTION,
+                "range": {"start": {"line": 32, "character": 3}},
+                "selectionRange": {"start": {"line": 32, "character": 12}},
+            }
+        ],
+    ]
+
+    with patch(
+        "ada_mcp.tools.symbols._open_file_paths",
+        return_value=["/work/crypto.ads", "/work/crypto.adb"],
+    ):
+        result = await handle_workspace_symbols(
+            client,
+            "Get_File_Hash",
+            kind="function",
+        )
+
+    assert result == {
+        "symbols": [
+            {
+                "name": "Get_File_Hash",
+                "kind": "function",
+                "file": "/work/crypto.ads",
+                "line": 22,
+                "column": 13,
+                "containerName": "",
+            },
+            {
+                "name": "Get_File_Hash",
+                "kind": "function",
+                "file": "/work/crypto.adb",
+                "line": 33,
+                "column": 13,
+                "containerName": "",
+            },
+        ],
+        "count": 2,
+        "truncated": False,
+        "complete": True,
+    }

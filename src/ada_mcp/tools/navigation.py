@@ -420,6 +420,11 @@ _open_files: WeakKeyDictionary[ALSClient, dict[str, _OpenFile]] = WeakKeyDiction
 _open_file_locks: WeakKeyDictionary[ALSClient, asyncio.Lock] = WeakKeyDictionary()
 
 
+def _open_file_paths(client: ALSClient) -> list[str]:
+    """Return the source paths synchronized with one ALS client."""
+    return sorted(uri_to_file(uri) for uri in _open_files.get(client, {}))
+
+
 async def _ensure_file_open(client: ALSClient, file_path: str) -> bool | None:
     """
     Synchronize a file with ALS.
