@@ -15,6 +15,7 @@ from typing import Any
 
 from ..utils.position import from_lsp_position_dict, to_lsp_position
 from ..utils.uri import file_to_uri, uri_to_file
+from .navigation import _ensure_file_open
 
 # LSP Completion Item Kind mapping
 COMPLETION_ITEM_KIND = {
@@ -69,6 +70,8 @@ async def handle_completions(
     """
     file_uri = file_to_uri(file)
     lsp_pos = to_lsp_position(line, column)
+
+    await _ensure_file_open(als_client, file)
 
     # Build completion context if trigger character provided
     params: dict[str, Any] = {
@@ -157,6 +160,8 @@ async def handle_signature_help(
     file_uri = file_to_uri(file)
     lsp_pos = to_lsp_position(line, column)
 
+    await _ensure_file_open(als_client, file)
+
     result = await als_client.send_request(
         "textDocument/signatureHelp",
         {
@@ -224,6 +229,8 @@ async def handle_code_actions(
         Dictionary with available code actions
     """
     file_uri = file_to_uri(file)
+
+    await _ensure_file_open(als_client, file)
 
     # Build range
     start_pos = to_lsp_position(start_line, start_column)
@@ -339,6 +346,8 @@ async def handle_rename_symbol(
     file_uri = file_to_uri(file)
     lsp_pos = to_lsp_position(line, column)
 
+    await _ensure_file_open(als_client, file)
+
     # First, check if rename is valid using prepareRename
     prepare_result = await als_client.send_request(
         "textDocument/prepareRename",
@@ -452,6 +461,8 @@ async def handle_format_file(
     """
     file_uri = file_to_uri(file)
 
+    await _ensure_file_open(als_client, file)
+
     result = await als_client.send_request(
         "textDocument/formatting",
         {
@@ -519,6 +530,8 @@ async def handle_get_spec(
     if line is not None and column is not None:
         file_uri = file_to_uri(file)
         lsp_pos = to_lsp_position(line, column)
+
+        await _ensure_file_open(als_client, file)
 
         # Use textDocument/declaration to find spec
         result = await als_client.send_request(
