@@ -47,6 +47,50 @@ COMPLETION_ITEM_KIND = {
 }
 
 
+def _python_index_for_lsp_character(line: str, character: int) -> int | None:
+    """Convert an LSP UTF-16 character offset into a Python string index."""
+    if character < 0:
+        return None
+    if character == 0:
+        return 0
+
+    utf16_units = 0
+    for index, value in enumerate(line):
+        utf16_units += 2 if ord(value) > 0xFFFF else 1
+        if utf16_units == character:
+            return index + 1
+        if utf16_units > character:
+            return None
+
+    return len(line) if utf16_units == character else None
+
+
+def _text_at_lsp_range(file: str, a_range: dict[str, Any]) -> str | None:
+    """Read the exact source text selected by a single-line LSP range."""
+    start = a_range.get("start", {})
+    end = a_range.get("end", {})
+    start_line = start.get("line")
+    end_line = end.get("line")
+    if not isinstance(start_line, int) or start_line != end_line:
+        return None
+
+    try:
+        lines = Path(file).read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+
+    if not 0 <= start_line < len(lines):
+        return None
+
+    line = lines[start_line]
+    start_index = _python_index_for_lsp_character(line, start.get("character", -1))
+    end_index = _python_index_for_lsp_character(line, end.get("character", -1))
+    if start_index is None or end_index is None or end_index < start_index:
+        return None
+
+    return line[start_index:end_index]
+
+
 async def handle_completions(
     als_client,
     file: str,
@@ -371,8 +415,15 @@ async def handle_rename_symbol(
         if "placeholder" in prepare_result:
             old_name = prepare_result["placeholder"]
         elif "start" in prepare_result:
-            # It's a Range, we need to extract the text
-            old_name = prepare_result.get("placeholder", "")
+            old_name = _text_at_lsp_range(file, prepare_result) or ""
+
+    if not old_name:
+        return {
+            "success": False,
+            "error": "Ada Language Server returned an unreadable prepareRename range",
+            "changes": [],
+            "total_changes": 0,
+        }
 
     # Perform the rename
     result = await als_client.send_request(
@@ -401,12 +452,13 @@ async def handle_rename_symbol(
             file_path = uri_to_file(uri)
             for edit in edits:
                 line_num, col_num = from_lsp_position_dict(edit["range"]["start"])
+                old_text = _text_at_lsp_range(file_path, edit["range"]) or old_name
                 changes.append(
                     {
                         "file": file_path,
                         "line": line_num,
                         "column": col_num,
-                        "old_text": old_name,
+                        "old_text": old_text,
                         "new_text": new_name,
                     }
                 )
@@ -418,12 +470,13 @@ async def handle_rename_symbol(
                 file_path = uri_to_file(uri)
                 for edit in doc_change.get("edits", []):
                     line_num, col_num = from_lsp_position_dict(edit["range"]["start"])
+                    old_text = _text_at_lsp_range(file_path, edit["range"]) or old_name
                     changes.append(
                         {
                             "file": file_path,
                             "line": line_num,
                             "column": col_num,
-                            "old_text": old_name,
+                            "old_text": old_text,
                             "new_text": new_name,
                         }
                     )

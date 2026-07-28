@@ -637,6 +637,60 @@ class TestRenameSymbol:
         assert result["files_affected"] == 2
 
     @pytest.mark.asyncio
+    async def test_rename_range_reports_exact_old_text(self, tmp_path, mock_als_client):
+        """A prepareRename range supplies exact names even without a placeholder."""
+        source = tmp_path / "sample.adb"
+        source.write_text(
+            "procedure Sample is\n"
+            "   Old_Name : Integer := 1;\n"
+            "begin\n"
+            "   old_name := Old_Name + 1;\n"
+            "end Sample;\n"
+        )
+        uri = source.resolve().as_uri()
+        mock_als_client.send_request.side_effect = [
+            {
+                "start": {"line": 1, "character": 3},
+                "end": {"line": 1, "character": 11},
+            },
+            {
+                "changes": {
+                    uri: [
+                        {
+                            "range": {
+                                "start": {"line": 1, "character": 3},
+                                "end": {"line": 1, "character": 11},
+                            },
+                            "newText": "New_Name",
+                        },
+                        {
+                            "range": {
+                                "start": {"line": 3, "character": 3},
+                                "end": {"line": 3, "character": 11},
+                            },
+                            "newText": "New_Name",
+                        },
+                    ]
+                }
+            },
+        ]
+
+        result = await handle_rename_symbol(
+            mock_als_client,
+            str(source),
+            line=2,
+            column=4,
+            new_name="New_Name",
+        )
+
+        assert result["success"] is True
+        assert result["old_name"] == "Old_Name"
+        assert [change["old_text"] for change in result["changes"]] == [
+            "Old_Name",
+            "old_name",
+        ]
+
+    @pytest.mark.asyncio
     async def test_rename_invalid_identifier(self, mock_als_client):
         """Test rename with invalid Ada identifier."""
         result = await handle_rename_symbol(
