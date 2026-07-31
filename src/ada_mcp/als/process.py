@@ -1,6 +1,7 @@
 """ALS process management - spawning, initialization, and lifecycle."""
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -249,6 +250,27 @@ async def find_gpr_file(project_root: Path) -> Path | None:
     return gpr_files[0]
 
 
+def get_project_scenario_variables() -> dict[str, str]:
+    """Read validated ALS scenario variables from the environment."""
+    raw_variables = os.environ.get("ADA_PROJECT_SCENARIO_VARIABLES")
+    if raw_variables is None:
+        return {}
+
+    try:
+        variables = json.loads(raw_variables)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "ADA_PROJECT_SCENARIO_VARIABLES must be a JSON object of string values"
+        ) from error
+
+    if not isinstance(variables, dict) or any(
+        not isinstance(name, str) or not isinstance(value, str) for name, value in variables.items()
+    ):
+        raise ValueError("ADA_PROJECT_SCENARIO_VARIABLES must be a JSON object of string values")
+
+    return variables
+
+
 async def start_als(
     project_root: Path,
     als_path: str | None = None,
@@ -279,6 +301,8 @@ async def start_als(
             gpr_file = project_root / env_gpr
         else:
             gpr_file = await find_gpr_file(project_root)
+
+    scenario_variables = get_project_scenario_variables()
 
     logger.info(f"Starting ALS: {resolved_als_path}")
     logger.info(f"Project root: {project_root}")
@@ -365,6 +389,8 @@ async def start_als(
     # like Python venvs or node_modules)
     if gpr_file and gpr_file.exists():
         init_params["initializationOptions"]["projectFile"] = str(gpr_file)
+        if scenario_variables:
+            init_params["initializationOptions"]["scenarioVariables"] = scenario_variables
     else:
         logger.warning(
             "No GPR project file found. Disabling ALS indexing to prevent "
@@ -389,7 +415,7 @@ async def start_als(
     # Current ALS releases read project settings through the normal LSP
     # configuration channel. Keep initializationOptions above for compatibility
     # with older releases, but also configure the active server explicitly.
-    ada_settings: dict[str, str | bool] = {}
+    ada_settings: dict[str, str | bool | dict[str, str]] = {}
     if gpr_file and gpr_file.exists():
         resolved_root = project_root.resolve()
         resolved_gpr = gpr_file.resolve()
@@ -398,6 +424,8 @@ async def start_als(
         except ValueError:
             project_file = str(resolved_gpr)
         ada_settings["projectFile"] = project_file
+        if scenario_variables:
+            ada_settings["scenarioVariables"] = scenario_variables
     else:
         ada_settings["enableIndexing"] = False
 

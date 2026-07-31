@@ -504,6 +504,7 @@ Get call relationships for a subprogram.
 |----------|---------|-------------|
 | `ALS_PATH` | `ada_language_server` | Path to ALS executable |
 | `ADA_PROJECT_FILE` | Auto-detect | GPR project file path |
+| `ADA_PROJECT_SCENARIO_VARIABLES` | `{}` | JSON object of ALS scenario variables |
 | `ADA_PROJECT_ROOT` | Current directory | Project root directory |
 | `ADA_MCP_LOG_LEVEL` | `INFO` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) |
 | `ADA_MCP_TIMEOUT` | `30` | Request timeout in seconds |

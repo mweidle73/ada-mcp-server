@@ -6,11 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ada_mcp.als.process import ALSHealthMonitor, start_als
+from ada_mcp.als.process import (
+    ALSHealthMonitor,
+    get_project_scenario_variables,
+    start_als,
+)
 
 
 @pytest.mark.asyncio
-async def test_start_als_configures_project_through_lsp(tmp_path):
+async def test_start_als_configures_project_through_lsp(tmp_path, monkeypatch):
     """Test that current ALS receives the project through LSP settings."""
     gpr_file = tmp_path / "sample.gpr"
     gpr_file.write_text("project Sample is end Sample;\n")
@@ -18,6 +22,10 @@ async def test_start_als_configures_project_through_lsp(tmp_path):
     client = MagicMock()
     client.send_request = AsyncMock(return_value={"capabilities": {}})
     client.send_notification = AsyncMock()
+    monkeypatch.setenv(
+        "ADA_PROJECT_SCENARIO_VARIABLES",
+        '{"BUILD_MODE":"analysis"}',
+    )
 
     with (
         patch(
@@ -44,6 +52,7 @@ async def test_start_als_configures_project_through_lsp(tmp_path):
             "settings": {
                 "ada": {
                     "projectFile": "sample.gpr",
+                    "scenarioVariables": {"BUILD_MODE": "analysis"},
                 }
             }
         },
@@ -52,6 +61,21 @@ async def test_start_als_configures_project_through_lsp(tmp_path):
     assert initialize_params["capabilities"]["workspace"]["didChangeWatchedFiles"] == {
         "dynamicRegistration": True,
     }
+    assert initialize_params["initializationOptions"]["scenarioVariables"] == {
+        "BUILD_MODE": "analysis",
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not-json", "[]", '{"BUILD_MODE":1}'],
+)
+def test_project_scenario_variables_reject_invalid_values(monkeypatch, value):
+    """Scenario variables must match the ALS string map contract."""
+    monkeypatch.setenv("ADA_PROJECT_SCENARIO_VARIABLES", value)
+
+    with pytest.raises(ValueError, match="must be a JSON object of string values"):
+        get_project_scenario_variables()
 
 
 class TestALSHealthMonitor:
