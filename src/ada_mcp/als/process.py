@@ -253,7 +253,7 @@ async def find_gpr_file(project_root: Path) -> Path | None:
 def get_project_scenario_variables() -> dict[str, str]:
     """Read validated ALS scenario variables from the environment."""
     raw_variables = os.environ.get("ADA_PROJECT_SCENARIO_VARIABLES")
-    if raw_variables is None:
+    if raw_variables is None or not raw_variables.strip():
         return {}
 
     try:
@@ -264,7 +264,7 @@ def get_project_scenario_variables() -> dict[str, str]:
         ) from error
 
     if not isinstance(variables, dict) or any(
-        not isinstance(name, str) or not isinstance(value, str) for name, value in variables.items()
+        not isinstance(value, str) for value in variables.values()
     ):
         raise ValueError("ADA_PROJECT_SCENARIO_VARIABLES must be a JSON object of string values")
 
@@ -308,6 +308,8 @@ async def start_als(
     logger.info(f"Project root: {project_root}")
     if gpr_file:
         logger.info(f"GPR file: {gpr_file}")
+    if scenario_variables:
+        logger.info("GPR scenario variables: %s", scenario_variables)
 
     # Get Alire environment if this is an Alire project
     alire_env = await get_alire_environment(project_root)

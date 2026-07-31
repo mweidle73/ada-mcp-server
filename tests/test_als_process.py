@@ -13,19 +13,14 @@ from ada_mcp.als.process import (
 )
 
 
-@pytest.mark.asyncio
-async def test_start_als_configures_project_through_lsp(tmp_path, monkeypatch):
-    """Test that current ALS receives the project through LSP settings."""
+async def start_mock_als(tmp_path):
+    """Start ALS with a mocked transport and return its client."""
     gpr_file = tmp_path / "sample.gpr"
     gpr_file.write_text("project Sample is end Sample;\n")
     process = MagicMock()
     client = MagicMock()
     client.send_request = AsyncMock(return_value={"capabilities": {}})
     client.send_notification = AsyncMock()
-    monkeypatch.setenv(
-        "ADA_PROJECT_SCENARIO_VARIABLES",
-        '{"BUILD_MODE":"analysis"}',
-    )
 
     with (
         patch(
@@ -46,6 +41,34 @@ async def test_start_als_configures_project_through_lsp(tmp_path, monkeypatch):
 
     assert result is client
     client.set_project_source_baseline.assert_called_once_with(tmp_path)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_start_als_configures_project_through_lsp(tmp_path):
+    """Test that current ALS receives the project through LSP settings."""
+    client = await start_mock_als(tmp_path)
+
+    client.send_notification.assert_any_await(
+        "workspace/didChangeConfiguration",
+        {"settings": {"ada": {"projectFile": "sample.gpr"}}},
+    )
+    initialize_params = client.send_request.await_args_list[0].args[1]
+    assert initialize_params["capabilities"]["workspace"]["didChangeWatchedFiles"] == {
+        "dynamicRegistration": True,
+    }
+    assert "scenarioVariables" not in initialize_params["initializationOptions"]
+
+
+@pytest.mark.asyncio
+async def test_start_als_configures_scenario_variables(tmp_path, monkeypatch):
+    """Test that ALS receives explicitly configured scenario variables."""
+    monkeypatch.setenv(
+        "ADA_PROJECT_SCENARIO_VARIABLES",
+        '{"BUILD_MODE":"analysis"}',
+    )
+    client = await start_mock_als(tmp_path)
+
     client.send_notification.assert_any_await(
         "workspace/didChangeConfiguration",
         {
@@ -64,6 +87,17 @@ async def test_start_als_configures_project_through_lsp(tmp_path, monkeypatch):
     assert initialize_params["initializationOptions"]["scenarioVariables"] == {
         "BUILD_MODE": "analysis",
     }
+
+
+@pytest.mark.parametrize("value", [None, "", "  \t"])
+def test_project_scenario_variables_default_to_empty(monkeypatch, value):
+    """An unset or empty payload preserves default ALS configuration."""
+    if value is None:
+        monkeypatch.delenv("ADA_PROJECT_SCENARIO_VARIABLES", raising=False)
+    else:
+        monkeypatch.setenv("ADA_PROJECT_SCENARIO_VARIABLES", value)
+
+    assert get_project_scenario_variables() == {}
 
 
 @pytest.mark.parametrize(
