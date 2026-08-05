@@ -13,7 +13,7 @@ from ada_mcp.als.process import (
 )
 
 
-async def start_mock_als(tmp_path):
+async def start_mock_als(tmp_path, *, caplog=None):
     """Start ALS with a mocked transport and return its client."""
     gpr_file = tmp_path / "sample.gpr"
     gpr_file.write_text("project Sample is end Sample;\n")
@@ -39,6 +39,10 @@ async def start_mock_als(tmp_path):
             gpr_file=gpr_file,
         )
 
+    if caplog is not None:
+        assert "BUILD_MODE" in caplog.text
+        assert "analysis" not in caplog.text
+
     assert result is client
     client.set_project_source_baseline.assert_called_once_with(tmp_path)
     return client
@@ -61,13 +65,14 @@ async def test_start_als_configures_project_through_lsp(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_start_als_configures_scenario_variables(tmp_path, monkeypatch):
+async def test_start_als_configures_scenario_variables(tmp_path, monkeypatch, caplog):
     """Test that ALS receives explicitly configured scenario variables."""
+    caplog.set_level("INFO")
     monkeypatch.setenv(
         "ADA_PROJECT_SCENARIO_VARIABLES",
         '{"BUILD_MODE":"analysis"}',
     )
-    client = await start_mock_als(tmp_path)
+    client = await start_mock_als(tmp_path, caplog=caplog)
 
     client.send_notification.assert_any_await(
         "workspace/didChangeConfiguration",

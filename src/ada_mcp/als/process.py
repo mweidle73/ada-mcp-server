@@ -309,7 +309,10 @@ async def start_als(
     if gpr_file:
         logger.info(f"GPR file: {gpr_file}")
     if scenario_variables:
-        logger.info("GPR scenario variables: %s", scenario_variables)
+        logger.info(
+            "GPR scenario variable names: %s",
+            ", ".join(sorted(scenario_variables)),
+        )
 
     # Get Alire environment if this is an Alire project
     alire_env = await get_alire_environment(project_root)
