@@ -400,13 +400,13 @@ class Phase1IntegrationTests:
             TestCase(
                 name="workspace_symbols: search 'Add'",
                 tool="ada_workspace_symbols",
-                args={"query": "Add"},
+                args={"file": str(self.main_adb), "query": "Add"},
                 check=lambda r: len(r.get("symbols", [])) >= 1
             ),
             TestCase(
                 name="workspace_symbols: search 'Main'",
                 tool="ada_workspace_symbols",
-                args={"query": "Main"},
+                args={"file": str(self.main_adb), "query": "Main"},
                 check=lambda r: len(r.get("symbols", [])) >= 1
             ),
             
