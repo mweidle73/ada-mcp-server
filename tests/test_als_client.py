@@ -183,9 +183,7 @@ async def test_diagnostic_publication_advances_generation():
     process.returncode = None
     client = ALSClient(process)
     uri = "file:///tmp/sample.ads"
-    waiter = asyncio.create_task(
-        client.wait_for_diagnostics(uri, after_generation=0, timeout=0.5)
-    )
+    waiter = asyncio.create_task(client.wait_for_diagnostics(uri, after_generation=0, timeout=0.5))
     await asyncio.sleep(0)
 
     await client._handle_diagnostics(
@@ -206,9 +204,7 @@ async def test_diagnostic_wait_uses_last_publication():
     process.returncode = None
     client = ALSClient(process)
     uri = "file:///tmp/sample.ads"
-    waiter = asyncio.create_task(
-        client.wait_for_diagnostics(uri, after_generation=0, timeout=0.5)
-    )
+    waiter = asyncio.create_task(client.wait_for_diagnostics(uri, after_generation=0, timeout=0.5))
 
     await client._handle_diagnostics(
         {

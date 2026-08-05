@@ -19,9 +19,7 @@ async def test_list_tools():
     assert "ada_hover" in tool_names
     assert "ada_diagnostics" in tool_names
 
-    workspace_symbols = next(
-        tool for tool in tools if tool.name == "ada_workspace_symbols"
-    )
+    workspace_symbols = next(tool for tool in tools if tool.name == "ada_workspace_symbols")
     assert workspace_symbols.inputSchema["required"] == ["file", "query"]
 
 

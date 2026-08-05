@@ -3,7 +3,7 @@ Comprehensive Phase 1 Unit Tests for Ada MCP Server.
 
 Tests cover:
 - ada_goto_definition
-- ada_hover  
+- ada_hover
 - ada_diagnostics
 
 Each tool is tested for:
@@ -14,18 +14,20 @@ Each tool is tested for:
 """
 
 import json
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 # ============================================================================
 # Fixtures
 # ============================================================================
 
+
 @pytest.fixture
 def mock_als_client():
     """Create a mock ALS client for unit testing."""
     import asyncio
+
     client = AsyncMock()
     client.send_request = AsyncMock()
     client.is_new_project_source = MagicMock(return_value=False)
@@ -49,26 +51,25 @@ def mock_get_als(mock_als_client):
 # ada_goto_definition Tests
 # ============================================================================
 
+
 class TestGotoDefinition:
     """Tests for ada_goto_definition tool."""
 
     @pytest.mark.asyncio
     async def test_definition_found_single_location(self, mock_get_als):
         """Test successful goto definition with single result."""
-        mock_get_als.send_request.return_value = [{
-            "uri": "file:///project/src/utils.ads",
-            "range": {
-                "start": {"line": 4, "character": 3},
-                "end": {"line": 4, "character": 6}
+        mock_get_als.send_request.return_value = [
+            {
+                "uri": "file:///project/src/utils.ads",
+                "range": {"start": {"line": 4, "character": 3}, "end": {"line": 4, "character": 6}},
             }
-        }]
+        ]
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 10,
-            "column": 5
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "/project/src/main.adb", "line": 10, "column": 5}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is True
@@ -82,20 +83,22 @@ class TestGotoDefinition:
         mock_get_als.send_request.return_value = [
             {
                 "uri": "file:///project/src/utils.ads",
-                "range": {"start": {"line": 4, "character": 3}, "end": {"line": 4, "character": 6}}
+                "range": {"start": {"line": 4, "character": 3}, "end": {"line": 4, "character": 6}},
             },
             {
                 "uri": "file:///project/src/utils.adb",
-                "range": {"start": {"line": 10, "character": 3}, "end": {"line": 10, "character": 6}}
-            }
+                "range": {
+                    "start": {"line": 10, "character": 3},
+                    "end": {"line": 10, "character": 6},
+                },
+            },
         ]
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 10,
-            "column": 5
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "/project/src/main.adb", "line": 10, "column": 5}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is True
@@ -107,11 +110,10 @@ class TestGotoDefinition:
         mock_get_als.send_request.return_value = None
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 10,
-            "column": 5
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "/project/src/main.adb", "line": 10, "column": 5}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is False
@@ -122,11 +124,10 @@ class TestGotoDefinition:
         mock_get_als.send_request.return_value = []
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 10,
-            "column": 5
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "/project/src/main.adb", "line": 10, "column": 5}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is False
@@ -137,11 +138,15 @@ class TestGotoDefinition:
         mock_get_als.send_request.return_value = None
 
         from ada_mcp.server import call_tool
-        await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 10,  # User provides 1-based
-            "column": 5
-        })
+
+        await call_tool(
+            "ada_goto_definition",
+            {
+                "file": "/project/src/main.adb",
+                "line": 10,  # User provides 1-based
+                "column": 5,
+            },
+        )
 
         # Verify LSP received 0-based
         call_args = mock_get_als.send_request.call_args
@@ -155,11 +160,10 @@ class TestGotoDefinition:
         mock_get_als.send_request.return_value = None
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 0,
-            "column": 1
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "/project/src/main.adb", "line": 0, "column": 1}
+        )
 
         # Should not crash, either return not found or handle gracefully
         data = json.loads(result[0].text)
@@ -171,11 +175,10 @@ class TestGotoDefinition:
         mock_get_als.send_request.side_effect = Exception("LSP error: invalid request")
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 10,
-            "column": 5
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "/project/src/main.adb", "line": 10, "column": 5}
+        )
 
         data = json.loads(result[0].text)
         # Error responses contain "error" key
@@ -186,6 +189,7 @@ class TestGotoDefinition:
 # ada_hover Tests
 # ============================================================================
 
+
 class TestHover:
     """Tests for ada_hover tool."""
 
@@ -195,16 +199,15 @@ class TestHover:
         mock_get_als.send_request.return_value = {
             "contents": {
                 "kind": "markdown",
-                "value": "```ada\nfunction Add (A, B : Integer) return Integer\n```"
+                "value": "```ada\nfunction Add (A, B : Integer) return Integer\n```",
             }
         }
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_hover", {
-            "file": "/project/src/main.adb",
-            "line": 5,
-            "column": 24
-        })
+
+        result = await call_tool(
+            "ada_hover", {"file": "/project/src/main.adb", "line": 5, "column": 24}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is True
@@ -213,16 +216,13 @@ class TestHover:
     @pytest.mark.asyncio
     async def test_hover_found_with_plaintext(self, mock_get_als):
         """Test hover with plaintext content."""
-        mock_get_als.send_request.return_value = {
-            "contents": "procedure Main is"
-        }
+        mock_get_als.send_request.return_value = {"contents": "procedure Main is"}
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_hover", {
-            "file": "/project/src/main.adb",
-            "line": 4,
-            "column": 12
-        })
+
+        result = await call_tool(
+            "ada_hover", {"file": "/project/src/main.adb", "line": 4, "column": 12}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is True
@@ -232,18 +232,14 @@ class TestHover:
     async def test_hover_found_with_marked_string_array(self, mock_get_als):
         """Test hover with array of marked strings."""
         mock_get_als.send_request.return_value = {
-            "contents": [
-                {"language": "ada", "value": "X : Integer"},
-                "A variable of type Integer"
-            ]
+            "contents": [{"language": "ada", "value": "X : Integer"}, "A variable of type Integer"]
         }
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_hover", {
-            "file": "/project/src/main.adb",
-            "line": 5,
-            "column": 4
-        })
+
+        result = await call_tool(
+            "ada_hover", {"file": "/project/src/main.adb", "line": 5, "column": 4}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is True
@@ -254,11 +250,10 @@ class TestHover:
         mock_get_als.send_request.return_value = None
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_hover", {
-            "file": "/project/src/main.adb",
-            "line": 1,
-            "column": 1
-        })
+
+        result = await call_tool(
+            "ada_hover", {"file": "/project/src/main.adb", "line": 1, "column": 1}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is False
@@ -269,11 +264,10 @@ class TestHover:
         mock_get_als.send_request.return_value = {"contents": ""}
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_hover", {
-            "file": "/project/src/main.adb",
-            "line": 1,
-            "column": 1
-        })
+
+        result = await call_tool(
+            "ada_hover", {"file": "/project/src/main.adb", "line": 1, "column": 1}
+        )
 
         data = json.loads(result[0].text)
         # Empty contents should still return found=True but empty
@@ -285,11 +279,15 @@ class TestHover:
         mock_get_als.send_request.return_value = None  # Keywords typically have no hover
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_hover", {
-            "file": "/project/src/main.adb",
-            "line": 6,
-            "column": 1  # "begin"
-        })
+
+        result = await call_tool(
+            "ada_hover",
+            {
+                "file": "/project/src/main.adb",
+                "line": 6,
+                "column": 1,  # "begin"
+            },
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is False
@@ -299,28 +297,29 @@ class TestHover:
 # ada_diagnostics Tests
 # ============================================================================
 
+
 class TestDiagnostics:
     """Tests for ada_diagnostics tool."""
 
     @pytest.mark.asyncio
     async def test_diagnostics_all_files(self, mock_get_als):
         """Test getting diagnostics for all files."""
-        from ada_mcp.als.types import Diagnostic, Range, Position, DiagnosticSeverity
+        from ada_mcp.als.types import Diagnostic, DiagnosticSeverity, Position, Range
+
         mock_get_als._diagnostics = {
             "file:///project/src/main.adb": [
                 Diagnostic(
                     range=Range(Position(4, 10), Position(4, 15)),
                     severity=DiagnosticSeverity.ERROR,
                     message="type mismatch",
-                    code="type-error"
+                    code="type-error",
                 )
             ]
         }
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_diagnostics", {
-            "severity": "all"
-        })
+
+        result = await call_tool("ada_diagnostics", {"severity": "all"})
 
         data = json.loads(result[0].text)
         assert data["errorCount"] >= 0
@@ -329,29 +328,30 @@ class TestDiagnostics:
     @pytest.mark.asyncio
     async def test_diagnostics_single_file(self, mock_get_als):
         """Test getting diagnostics for specific file."""
-        from ada_mcp.als.types import Diagnostic, Range, Position, DiagnosticSeverity
+        from ada_mcp.als.types import Diagnostic, DiagnosticSeverity, Position, Range
+
         mock_get_als._diagnostics = {
             "file:///project/src/main.adb": [
                 Diagnostic(
                     range=Range(Position(4, 10), Position(4, 15)),
                     severity=DiagnosticSeverity.ERROR,
-                    message="error in main.adb"
+                    message="error in main.adb",
                 )
             ],
             "file:///project/src/utils.ads": [
                 Diagnostic(
                     range=Range(Position(2, 0), Position(2, 10)),
                     severity=DiagnosticSeverity.WARNING,
-                    message="warning in utils.ads"
+                    message="warning in utils.ads",
                 )
-            ]
+            ],
         }
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_diagnostics", {
-            "file": "/project/src/main.adb",
-            "severity": "all"
-        })
+
+        result = await call_tool(
+            "ada_diagnostics", {"file": "/project/src/main.adb", "severity": "all"}
+        )
 
         data = json.loads(result[0].text)
         # Should only include main.adb diagnostics
@@ -361,19 +361,25 @@ class TestDiagnostics:
     @pytest.mark.asyncio
     async def test_diagnostics_filter_errors_only(self, mock_get_als):
         """Test filtering for errors only."""
-        from ada_mcp.als.types import Diagnostic, Range, Position, DiagnosticSeverity
+        from ada_mcp.als.types import Diagnostic, DiagnosticSeverity, Position, Range
+
         mock_get_als._diagnostics = {
             "file:///project/src/main.adb": [
-                Diagnostic(Range(Position(4, 0), Position(4, 5)), DiagnosticSeverity.ERROR, "error"),
-                Diagnostic(Range(Position(5, 0), Position(5, 5)), DiagnosticSeverity.WARNING, "warning"),
-                Diagnostic(Range(Position(6, 0), Position(6, 5)), DiagnosticSeverity.INFORMATION, "info"),
+                Diagnostic(
+                    Range(Position(4, 0), Position(4, 5)), DiagnosticSeverity.ERROR, "error"
+                ),
+                Diagnostic(
+                    Range(Position(5, 0), Position(5, 5)), DiagnosticSeverity.WARNING, "warning"
+                ),
+                Diagnostic(
+                    Range(Position(6, 0), Position(6, 5)), DiagnosticSeverity.INFORMATION, "info"
+                ),
             ]
         }
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_diagnostics", {
-            "severity": "error"
-        })
+
+        result = await call_tool("ada_diagnostics", {"severity": "error"})
 
         data = json.loads(result[0].text)
         for diag in data.get("diagnostics", []):
@@ -382,18 +388,22 @@ class TestDiagnostics:
     @pytest.mark.asyncio
     async def test_diagnostics_filter_warnings_only(self, mock_get_als):
         """Test filtering for warnings only."""
-        from ada_mcp.als.types import Diagnostic, Range, Position, DiagnosticSeverity
+        from ada_mcp.als.types import Diagnostic, DiagnosticSeverity, Position, Range
+
         mock_get_als._diagnostics = {
             "file:///project/src/main.adb": [
-                Diagnostic(Range(Position(4, 0), Position(4, 5)), DiagnosticSeverity.ERROR, "error"),
-                Diagnostic(Range(Position(5, 0), Position(5, 5)), DiagnosticSeverity.WARNING, "warning"),
+                Diagnostic(
+                    Range(Position(4, 0), Position(4, 5)), DiagnosticSeverity.ERROR, "error"
+                ),
+                Diagnostic(
+                    Range(Position(5, 0), Position(5, 5)), DiagnosticSeverity.WARNING, "warning"
+                ),
             ]
         }
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_diagnostics", {
-            "severity": "warning"
-        })
+
+        result = await call_tool("ada_diagnostics", {"severity": "warning"})
 
         data = json.loads(result[0].text)
         for diag in data.get("diagnostics", []):
@@ -405,9 +415,8 @@ class TestDiagnostics:
         mock_get_als._diagnostics = {}
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_diagnostics", {
-            "severity": "all"
-        })
+
+        result = await call_tool("ada_diagnostics", {"severity": "all"})
 
         data = json.loads(result[0].text)
         assert data["errorCount"] == 0
@@ -417,21 +426,21 @@ class TestDiagnostics:
     @pytest.mark.asyncio
     async def test_diagnostics_line_number_conversion(self, mock_get_als):
         """Test that line numbers are converted from 0-based to 1-based."""
-        from ada_mcp.als.types import Diagnostic, Range, Position, DiagnosticSeverity
+        from ada_mcp.als.types import Diagnostic, DiagnosticSeverity, Position, Range
+
         mock_get_als._diagnostics = {
             "file:///project/src/main.adb": [
                 Diagnostic(
                     range=Range(Position(9, 4), Position(9, 10)),  # 0-based line 9
                     severity=DiagnosticSeverity.ERROR,
-                    message="test error"
+                    message="test error",
                 )
             ]
         }
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_diagnostics", {
-            "severity": "all"
-        })
+
+        result = await call_tool("ada_diagnostics", {"severity": "all"})
 
         data = json.loads(result[0].text)
         if data.get("diagnostics"):
@@ -443,6 +452,7 @@ class TestDiagnostics:
 # Input Validation Tests
 # ============================================================================
 
+
 class TestInputValidation:
     """Tests for input validation across all Phase 1 tools."""
 
@@ -450,11 +460,15 @@ class TestInputValidation:
     async def test_goto_missing_file_param(self, mock_get_als):
         """Test goto_definition with missing file parameter."""
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "line": 10,
-            "column": 5
-            # Missing "file"
-        })
+
+        result = await call_tool(
+            "ada_goto_definition",
+            {
+                "line": 10,
+                "column": 5,
+                # Missing "file"
+            },
+        )
 
         data = json.loads(result[0].text)
         assert "error" in data or data.get("found") is False
@@ -463,11 +477,15 @@ class TestInputValidation:
     async def test_goto_missing_line_param(self, mock_get_als):
         """Test goto_definition with missing line parameter."""
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "column": 5
-            # Missing "line"
-        })
+
+        result = await call_tool(
+            "ada_goto_definition",
+            {
+                "file": "/project/src/main.adb",
+                "column": 5,
+                # Missing "line"
+            },
+        )
 
         data = json.loads(result[0].text)
         assert "error" in data or data.get("found") is False
@@ -478,13 +496,10 @@ class TestInputValidation:
         # Empty file paths convert to current directory, which is invalid
         # The handler logs a warning but proceeds; mock returns a result anyway
         mock_get_als.send_request.return_value = None
-        
+
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_hover", {
-            "file": "",
-            "line": 5,
-            "column": 1
-        })
+
+        result = await call_tool("ada_hover", {"file": "", "line": 5, "column": 1})
 
         data = json.loads(result[0].text)
         # Should return not found (mock returns None)
@@ -494,11 +509,10 @@ class TestInputValidation:
     async def test_diagnostics_invalid_severity(self, mock_get_als):
         """Test diagnostics with invalid severity filter."""
         mock_get_als._diagnostics = {}
-        
+
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_diagnostics", {
-            "severity": "invalid_severity"
-        })
+
+        result = await call_tool("ada_diagnostics", {"severity": "invalid_severity"})
 
         # Should handle gracefully, either ignore or return error
         data = json.loads(result[0].text)
@@ -509,6 +523,7 @@ class TestInputValidation:
 # File Path Handling Tests
 # ============================================================================
 
+
 class TestFilePathHandling:
     """Tests for file path and URI handling."""
 
@@ -518,11 +533,15 @@ class TestFilePathHandling:
         mock_get_als.send_request.return_value = None
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "src/main.adb",  # Relative path
-            "line": 5,
-            "column": 10
-        })
+
+        result = await call_tool(
+            "ada_goto_definition",
+            {
+                "file": "src/main.adb",  # Relative path
+                "line": 5,
+                "column": 10,
+            },
+        )
 
         # Should handle or convert relative path
         data = json.loads(result[0].text)
@@ -534,11 +553,10 @@ class TestFilePathHandling:
         mock_get_als.send_request.return_value = None
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "file:///project/src/main.adb",
-            "line": 5,
-            "column": 10
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "file:///project/src/main.adb", "line": 5, "column": 10}
+        )
 
         data = json.loads(result[0].text)
         assert "found" in data or "error" in data
@@ -546,17 +564,18 @@ class TestFilePathHandling:
     @pytest.mark.asyncio
     async def test_result_file_path_normalization(self, mock_get_als):
         """Test that returned file paths are normalized (not URIs)."""
-        mock_get_als.send_request.return_value = [{
-            "uri": "file:///project/src/utils.ads",
-            "range": {"start": {"line": 4, "character": 3}, "end": {"line": 4, "character": 6}}
-        }]
+        mock_get_als.send_request.return_value = [
+            {
+                "uri": "file:///project/src/utils.ads",
+                "range": {"start": {"line": 4, "character": 3}, "end": {"line": 4, "character": 6}},
+            }
+        ]
 
         from ada_mcp.server import call_tool
-        result = await call_tool("ada_goto_definition", {
-            "file": "/project/src/main.adb",
-            "line": 10,
-            "column": 5
-        })
+
+        result = await call_tool(
+            "ada_goto_definition", {"file": "/project/src/main.adb", "line": 10, "column": 5}
+        )
 
         data = json.loads(result[0].text)
         assert data["found"] is True

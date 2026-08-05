@@ -46,11 +46,7 @@ async def test_edited_source_is_synchronized_with_did_change(tmp_path):
     clear_open_files_cache()
 
     assert await _ensure_file_open(client, str(source)) is True
-    source.write_text(
-        "package Sample is\n"
-        "   Changed : constant := 1;\n"
-        "end Sample;\n"
-    )
+    source.write_text("package Sample is\n   Changed : constant := 1;\nend Sample;\n")
     assert await _ensure_file_open(client, str(source)) is True
     assert await _ensure_file_open(client, str(source)) is False
 

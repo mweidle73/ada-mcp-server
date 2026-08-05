@@ -305,18 +305,18 @@ class TestCachedWithFileInvalidation:
             return {"file": file, "line": line}
 
         # First call
-        result1 = await get_hover("/path/main.adb", 10)
+        await get_hover("/path/main.adb", 10)
         assert call_count == 1
 
         # Same call - cached
-        result2 = await get_hover("/path/main.adb", 10)
+        await get_hover("/path/main.adb", 10)
         assert call_count == 1
 
         # Invalidate the file
         await cache.invalidate_file("/path/main.adb")
 
         # Should recompute
-        result3 = await get_hover("/path/main.adb", 10)
+        await get_hover("/path/main.adb", 10)
         assert call_count == 2
 
 

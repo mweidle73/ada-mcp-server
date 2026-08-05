@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 async def test_als_client():
     """Test ALS client functionality."""
-    from ada_mcp.als.process import start_als, shutdown_als
+    from ada_mcp.als.process import shutdown_als, start_als
 
     print("=" * 60)
     print("ALS Client Direct Test")
@@ -25,7 +25,7 @@ async def test_als_client():
 
     # Use the sample project for testing
     project_root = Path(__file__).parent.parent / "tests" / "fixtures" / "sample_project"
-    
+
     if not project_root.exists():
         print(f"ERROR: Test project not found at {project_root}")
         return False
@@ -33,10 +33,11 @@ async def test_als_client():
     # Check if ALS is available
     als_path = os.environ.get("ALS_PATH", "ada_language_server")
     print(f"\n[1] Checking ALS availability: {als_path}")
-    
+
     try:
         proc = await asyncio.create_subprocess_exec(
-            als_path, "--version",
+            als_path,
+            "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -44,22 +45,23 @@ async def test_als_client():
         if proc.returncode != 0:
             # ALS doesn't have --version, try --help
             proc = await asyncio.create_subprocess_exec(
-                als_path, "--help",
+                als_path,
+                "--help",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
-        
-        print(f"    ✓ ALS found")
+
+        print("    ✓ ALS found")
         if stdout:
             print(f"    {stdout.decode().strip()[:100]}")
     except FileNotFoundError:
         print(f"    ✗ ALS not found at: {als_path}")
-        print(f"    Set ALS_PATH environment variable or install ada_language_server")
+        print("    Set ALS_PATH environment variable or install ada_language_server")
         return False
 
     print(f"\n[2] Starting ALS with project: {project_root}")
-    
+
     try:
         client = await start_als(project_root)
         print("    ✓ ALS started and initialized")
@@ -76,17 +78,20 @@ async def test_als_client():
         print("\n[3] Opening test file...")
         test_file = project_root / "src" / "main.adb"
         if test_file.exists():
-            await client.send_notification("textDocument/didOpen", {
-                "textDocument": {
-                    "uri": test_file.as_uri(),
-                    "languageId": "ada",
-                    "version": 1,
-                    "text": test_file.read_text(),
-                }
-            })
+            await client.send_notification(
+                "textDocument/didOpen",
+                {
+                    "textDocument": {
+                        "uri": test_file.as_uri(),
+                        "languageId": "ada",
+                        "version": 1,
+                        "text": test_file.read_text(),
+                    }
+                },
+            )
             print(f"    ✓ Opened {test_file.name}")
             tests_passed += 1
-            
+
             # Give ALS time to process
             await asyncio.sleep(1.0)
         else:
@@ -96,9 +101,9 @@ async def test_als_client():
         # Test 2: Get document symbols
         print("\n[4] Getting document symbols...")
         try:
-            symbols = await client.send_request("textDocument/documentSymbol", {
-                "textDocument": {"uri": test_file.as_uri()}
-            })
+            symbols = await client.send_request(
+                "textDocument/documentSymbol", {"textDocument": {"uri": test_file.as_uri()}}
+            )
             if symbols:
                 print(f"    ✓ Found {len(symbols)} symbols:")
                 for sym in symbols[:5]:
@@ -116,10 +121,13 @@ async def test_als_client():
         # Test 3: Hover
         print("\n[5] Testing hover on 'Main' procedure...")
         try:
-            hover = await client.send_request("textDocument/hover", {
-                "textDocument": {"uri": test_file.as_uri()},
-                "position": {"line": 3, "character": 11}  # 0-based, "Main" position
-            })
+            hover = await client.send_request(
+                "textDocument/hover",
+                {
+                    "textDocument": {"uri": test_file.as_uri()},
+                    "position": {"line": 3, "character": 11},  # 0-based, "Main" position
+                },
+            )
             if hover:
                 contents = hover.get("contents", {})
                 if isinstance(contents, dict):
@@ -139,16 +147,19 @@ async def test_als_client():
         print("\n[6] Testing goto definition on 'Utils.Add'...")
         try:
             # Line 4 has "Utils.Add" - try to go to definition of Add
-            definition = await client.send_request("textDocument/definition", {
-                "textDocument": {"uri": test_file.as_uri()},
-                "position": {"line": 4, "character": 23}  # Position of "Add"
-            })
+            definition = await client.send_request(
+                "textDocument/definition",
+                {
+                    "textDocument": {"uri": test_file.as_uri()},
+                    "position": {"line": 4, "character": 23},  # Position of "Add"
+                },
+            )
             if definition:
                 if isinstance(definition, list):
                     loc = definition[0] if definition else None
                 else:
                     loc = definition
-                
+
                 if loc:
                     uri = loc.get("uri", loc.get("targetUri", ""))
                     print(f"    ✓ Found definition at: {uri}")
@@ -166,11 +177,14 @@ async def test_als_client():
         # Test 5: Find references
         print("\n[7] Testing find references...")
         try:
-            references = await client.send_request("textDocument/references", {
-                "textDocument": {"uri": test_file.as_uri()},
-                "position": {"line": 4, "character": 4},  # "Value" variable
-                "context": {"includeDeclaration": True}
-            })
+            references = await client.send_request(
+                "textDocument/references",
+                {
+                    "textDocument": {"uri": test_file.as_uri()},
+                    "position": {"line": 4, "character": 4},  # "Value" variable
+                    "context": {"includeDeclaration": True},
+                },
+            )
             if references:
                 print(f"    ✓ Found {len(references)} references")
                 tests_passed += 1

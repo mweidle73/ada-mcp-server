@@ -12,10 +12,10 @@ from ada_mcp.tools.project import (
     handle_project_info,
 )
 
-
 # ============================================================================
 # Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def sample_gpr_path():
@@ -40,6 +40,7 @@ def mock_als_client():
 # ============================================================================
 # ada_project_info Tests (Task 3.2)
 # ============================================================================
+
 
 class TestProjectInfo:
     """Tests for ada_project_info tool."""
@@ -189,127 +190,140 @@ class TestProjectInfo:
 # ada_call_hierarchy Tests (Task 3.3 & 3.4)
 # ============================================================================
 
+
 class TestCallHierarchy:
     """Tests for ada_call_hierarchy tool."""
-    
+
     @pytest.mark.asyncio
     async def test_call_hierarchy_outgoing(self, mock_als_client):
         """Test outgoing call hierarchy."""
         # Mock prepare call hierarchy
         mock_als_client.send_request.side_effect = [
             # prepareCallHierarchy response
-            [{
-                "name": "Main",
-                "kind": 12,
-                "uri": "file:///test/main.adb",
-                "range": {"start": {"line": 3, "character": 10}}
-            }],
-            # outgoingCalls response
-            [{
-                "to": {
-                    "name": "Utils.Add",
+            [
+                {
+                    "name": "Main",
                     "kind": 12,
-                    "uri": "file:///test/utils.adb",
-                    "range": {"start": {"line": 4, "character": 12}}
+                    "uri": "file:///test/main.adb",
+                    "range": {"start": {"line": 3, "character": 10}},
                 }
-            }]
+            ],
+            # outgoingCalls response
+            [
+                {
+                    "to": {
+                        "name": "Utils.Add",
+                        "kind": 12,
+                        "uri": "file:///test/utils.adb",
+                        "range": {"start": {"line": 4, "character": 12}},
+                    }
+                }
+            ],
         ]
-        
+
         result = await handle_call_hierarchy(
-            mock_als_client,
-            "/test/main.adb",
-            line=4,
-            column=11,
-            direction="outgoing"
+            mock_als_client, "/test/main.adb", line=4, column=11, direction="outgoing"
         )
-        
+
         assert result["found"] is True
         assert result["symbol"] == "Main"
         assert len(result["outgoing_calls"]) == 1
         assert result["outgoing_calls"][0]["name"] == "Utils.Add"
         assert result["outgoing_count"] == 1
         assert len(result["incoming_calls"]) == 0
-    
+
     @pytest.mark.asyncio
     async def test_call_hierarchy_incoming(self, mock_als_client):
         """Test incoming call hierarchy."""
         mock_als_client.send_request.side_effect = [
             # prepareCallHierarchy response
-            [{
-                "name": "Add",
-                "kind": 12,
-                "uri": "file:///test/utils.adb",
-                "range": {"start": {"line": 4, "character": 12}}
-            }],
-            # incomingCalls response
-            [{
-                "from": {
-                    "name": "Main",
+            [
+                {
+                    "name": "Add",
                     "kind": 12,
-                    "uri": "file:///test/main.adb",
-                    "range": {"start": {"line": 5, "character": 4}}
+                    "uri": "file:///test/utils.adb",
+                    "range": {"start": {"line": 4, "character": 12}},
                 }
-            }]
+            ],
+            # incomingCalls response
+            [
+                {
+                    "from": {
+                        "name": "Main",
+                        "kind": 12,
+                        "uri": "file:///test/main.adb",
+                        "range": {"start": {"line": 5, "character": 4}},
+                    }
+                }
+            ],
         ]
-        
+
         result = await handle_call_hierarchy(
-            mock_als_client,
-            "/test/utils.adb",
-            line=5,
-            column=13,
-            direction="incoming"
+            mock_als_client, "/test/utils.adb", line=5, column=13, direction="incoming"
         )
-        
+
         assert result["found"] is True
         assert len(result["incoming_calls"]) == 1
         assert result["incoming_calls"][0]["name"] == "Main"
         assert result["incoming_count"] == 1
         assert len(result["outgoing_calls"]) == 0
-    
+
     @pytest.mark.asyncio
     async def test_call_hierarchy_both(self, mock_als_client):
         """Test both incoming and outgoing calls."""
         mock_als_client.send_request.side_effect = [
             # prepareCallHierarchy response
-            [{
-                "name": "Process",
-                "kind": 12,
-                "uri": "file:///test/process.adb",
-                "range": {"start": {"line": 10, "character": 12}}
-            }],
+            [
+                {
+                    "name": "Process",
+                    "kind": 12,
+                    "uri": "file:///test/process.adb",
+                    "range": {"start": {"line": 10, "character": 12}},
+                }
+            ],
             # outgoingCalls response
-            [{"to": {"name": "Helper", "kind": 12, "uri": "file:///test/helper.adb", "range": {"start": {"line": 5, "character": 4}}}}],
+            [
+                {
+                    "to": {
+                        "name": "Helper",
+                        "kind": 12,
+                        "uri": "file:///test/helper.adb",
+                        "range": {"start": {"line": 5, "character": 4}},
+                    }
+                }
+            ],
             # incomingCalls response
-            [{"from": {"name": "Main", "kind": 12, "uri": "file:///test/main.adb", "range": {"start": {"line": 8, "character": 4}}}}]
+            [
+                {
+                    "from": {
+                        "name": "Main",
+                        "kind": 12,
+                        "uri": "file:///test/main.adb",
+                        "range": {"start": {"line": 8, "character": 4}},
+                    }
+                }
+            ],
         ]
-        
+
         result = await handle_call_hierarchy(
-            mock_als_client,
-            "/test/process.adb",
-            line=11,
-            column=13,
-            direction="both"
+            mock_als_client, "/test/process.adb", line=11, column=13, direction="both"
         )
-        
+
         assert result["found"] is True
         assert len(result["outgoing_calls"]) == 1
         assert len(result["incoming_calls"]) == 1
         assert result["outgoing_count"] == 1
         assert result["incoming_count"] == 1
-    
+
     @pytest.mark.asyncio
     async def test_call_hierarchy_not_found(self, mock_als_client):
         """Test call hierarchy when symbol not found."""
         mock_als_client.send_request.return_value = None
-        
+
         result = await handle_call_hierarchy(
-            mock_als_client,
-            "/test/main.adb",
-            line=1,
-            column=1,
-            direction="outgoing"
+            mock_als_client, "/test/main.adb", line=1, column=1, direction="outgoing"
         )
-        
+
         assert result["found"] is False
         assert result["outgoing_calls"] == []
         assert result["incoming_calls"] == []
@@ -319,9 +333,10 @@ class TestCallHierarchy:
 # ada_dependency_graph Tests (Task 3.5)
 # ============================================================================
 
+
 class TestDependencyGraph:
     """Tests for ada_dependency_graph tool."""
-    
+
     @pytest.mark.asyncio
     async def test_dependency_graph_single_file(self, tmp_path):
         """Test dependency graph for a single file."""
@@ -334,26 +349,26 @@ package Utils is
    function Add (A, B : Integer) return Integer;
 end Utils;
 """)
-        
+
         result = await handle_dependency_graph(str(ada_file))
-        
+
         assert result["package_count"] == 1
         assert len(result["dependencies"]) == 1
         dep = result["dependencies"][0]
         assert dep["package"] == "Utils"
         assert "Ada.Text_IO" in dep["depends_on"]
         assert "Ada.Strings" in dep["depends_on"]
-    
+
     @pytest.mark.asyncio
     async def test_dependency_graph_directory(self, sample_ada_file):
         """Test dependency graph for a directory."""
         src_dir = sample_ada_file.parent
-        
+
         result = await handle_dependency_graph(str(src_dir))
-        
+
         assert result["package_count"] >= 1
         assert len(result["dependencies"]) >= 1
-    
+
     @pytest.mark.asyncio
     async def test_dependency_graph_multiple_with(self, tmp_path):
         """Test parsing multiple packages in one with clause."""
@@ -366,23 +381,23 @@ begin
    null;
 end Main;
 """)
-        
+
         result = await handle_dependency_graph(str(ada_file))
-        
+
         assert len(result["dependencies"]) == 1
         deps = result["dependencies"][0]["depends_on"]
         assert "Ada.Text_IO" in deps
         assert "Ada.Strings" in deps
         assert "Utils" in deps
-    
+
     @pytest.mark.asyncio
     async def test_dependency_graph_nonexistent(self):
         """Test dependency graph for non-existent path."""
         result = await handle_dependency_graph("/nonexistent/path")
-        
+
         assert result["dependencies"] == []
         assert result["package_count"] == 0
-    
+
     @pytest.mark.asyncio
     async def test_dependency_graph_package_body(self, tmp_path):
         """Test dependency graph includes package bodies."""
@@ -397,9 +412,9 @@ package body Utils is
    end Add;
 end Utils;
 """)
-        
+
         result = await handle_dependency_graph(str(ada_file))
-        
+
         assert result["package_count"] == 1
         assert len(result["dependencies"]) == 1
         assert result["dependencies"][0]["package"] == "Utils"
