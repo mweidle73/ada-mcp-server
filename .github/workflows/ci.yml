@@ -2,59 +2,129 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [abuild-gh, abuild/maintained]
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ada-mcp-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ALS_VERSION: 2026.3.202607051
+  ALS_SHA256: 9dfa29af05418913ff445be0c6875f7a51ebad5fc781f3446d3e2c3903d09787
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13']
-    
+        python-version: ['3.11', '3.12']
+
     steps:
-      - uses: actions/checkout@v4
-      
+      - name: Check out sources
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: ${{ matrix.python-version }}
-      
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-      
-      - name: Run unit tests
-        run: |
-          pytest tests/ -v --tb=short
 
-  lint:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff mypy
-          pip install -e .
-      
-      - name: Run ruff (linter)
+          python -m pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -q --tb=short
+
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
         run: |
-          ruff check src/
-      
-      - name: Run ruff (formatter check)
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Check source and test formatting
         run: |
-          ruff format --check src/
-      
-      - name: Run mypy (type checking)
+          ruff check src tests scripts
+          ruff format --check src tests scripts
+
+      - name: Check strict typing
+        run: mypy src/ada_mcp --ignore-missing-imports
+
+      - name: Run coverage suite
         run: |
-          mypy src/ada_mcp --ignore-missing-imports || echo "::warning::mypy found type issues (non-blocking)"
+          python -m pytest tests/ -q --tb=short \
+            --cov=ada_mcp \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html:htmlcov
+
+      - name: Build and inspect distributions
+        run: |
+          python -m build
+          python -m twine check dist/*
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: warn
+          retention-days: 7
+
+  als-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Install Ada MCP
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Install pinned Ada Language Server
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/AdaCore/ada_language_server/releases/download/${ALS_VERSION}/als-${ALS_VERSION}-linux-x64.tar.gz" \
+            --output /tmp/als.tar.gz
+          echo "${ALS_SHA256}  /tmp/als.tar.gz" | sha256sum --check -
+          mkdir -p /tmp/als
+          tar -xzf /tmp/als.tar.gz \
+            -C /tmp/als \
+            --strip-components=5 \
+            integration/vscode/ada/x64/linux/ada_language_server
+          chmod 0755 /tmp/als/ada_language_server
+
+      - name: Run real ALS protocol probe
+        env:
+          ALS_PATH: /tmp/als/ada_language_server
+        run: python scripts/test_integration.py

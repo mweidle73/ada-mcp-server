@@ -1,8 +1,24 @@
 # Ada MCP Server
 
-[![CI](https://github.com/ada-mcp/ada-mcp-server/workflows/CI/badge.svg)](https://github.com/ada-mcp/ada-mcp-server/actions)
+[![CI](https://github.com/mweidle73/ada-mcp-server/actions/workflows/ci.yml/badge.svg?branch=abuild-gh)](https://github.com/mweidle73/ada-mcp-server/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> [!NOTE]
+> This repository is a maintained downstream fork of
+> [MDBrothers/ada-mcp-server](https://github.com/MDBrothers/ada-mcp-server).
+> Its server changes are deliberately project-neutral and are candidates for
+> submission upstream; Abuild-specific project configuration remains in the
+> Abuild repository.
+
+The fork uses three branches with distinct responsibilities:
+
+- `main` mirrors the current upstream history.
+- `abuild/maintained` carries the general ALS/MCP correctness patches used by
+  Abuild and suitable for other Ada projects.
+- `abuild-gh` is the default operational branch and adds fork documentation,
+  pinned GitHub Actions and maintenance automation. It does not publish
+  releases or packages.
 
 An MCP (Model Context Protocol) server that wraps the Ada Language Server (ALS) to provide semantic Ada language features to AI coding agents like GitHub Copilot.
 
@@ -61,8 +77,9 @@ python --version  # Should be 3.11 or higher
 # From PyPI
 pip install ada-mcp-server
 
-# From source
-git clone https://github.com/ada-mcp/ada-mcp-server
+# From this maintained fork
+git clone --branch abuild/maintained \
+  https://github.com/mweidle73/ada-mcp-server.git
 cd ada-mcp-server
 pip install -e .
 
