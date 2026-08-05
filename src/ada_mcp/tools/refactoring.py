@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ada_mcp.als.client import ALSClient
+
 from ..utils.position import from_lsp_position_dict, to_lsp_position
 from ..utils.uri import file_to_uri, uri_to_file
 from .navigation import _ensure_file_open
@@ -92,7 +94,7 @@ def _text_at_lsp_range(file: str, a_range: dict[str, Any]) -> str | None:
 
 
 async def handle_completions(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int,
     column: int,
@@ -180,12 +182,13 @@ def _extract_documentation(doc: Any) -> str:
         return doc
     if isinstance(doc, dict):
         # MarkupContent
-        return doc.get("value", "")
+        value = doc.get("value", "")
+        return value if isinstance(value, str) else str(value)
     return str(doc)
 
 
 async def handle_signature_help(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int,
     column: int,
@@ -250,13 +253,13 @@ async def handle_signature_help(
 
 
 async def handle_code_actions(
-    als_client,
+    als_client: ALSClient,
     file: str,
     start_line: int,
     start_column: int,
     end_line: int | None = None,
     end_column: int | None = None,
-    diagnostics: list[dict] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Handle ada_code_actions tool request.
 
@@ -358,7 +361,7 @@ def _is_valid_ada_identifier(name: str) -> bool:
 
 
 async def handle_rename_symbol(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int,
     column: int,
@@ -496,7 +499,7 @@ async def handle_rename_symbol(
 
 
 async def handle_format_file(
-    als_client,
+    als_client: ALSClient,
     file: str,
     tab_size: int = 3,
     insert_spaces: bool = True,
@@ -559,7 +562,7 @@ async def handle_format_file(
 
 
 async def handle_get_spec(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int | None = None,
     column: int | None = None,
@@ -622,12 +625,12 @@ async def handle_get_spec(
 
     # Fallback: Find corresponding .ads file
     if file_path.suffix.lower() == ".adb":
-        spec_file = file_path.with_suffix(".ads")
-        if spec_file.exists():
+        spec_file_path = file_path.with_suffix(".ads")
+        if spec_file_path.exists():
             # Read first non-comment line for preview
             preview = ""
             try:
-                with open(spec_file) as f:
+                with open(spec_file_path) as f:
                     for spec_line in f:
                         stripped = spec_line.strip()
                         if stripped and not stripped.startswith("--"):
@@ -638,7 +641,7 @@ async def handle_get_spec(
 
             return {
                 "found": True,
-                "spec_file": str(spec_file),
+                "spec_file": str(spec_file_path),
                 "line": 1,
                 "column": 1,
                 "preview": preview,

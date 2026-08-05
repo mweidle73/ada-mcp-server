@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ada_mcp.als.client import LSPError
+from ada_mcp.als.client import ALSClient, LSPError
 
 from ..utils.position import to_lsp_position
 from ..utils.uri import file_to_uri, uri_to_file
@@ -38,7 +38,7 @@ def _to_dict(obj: Any) -> Any:
         return obj
 
 
-async def _execute_als_command(als_client, command: str) -> Any:
+async def _execute_als_command(als_client: ALSClient, command: str) -> Any:
     """Execute one of ALS's structured project-information commands."""
     return _to_dict(
         await als_client.send_request(
@@ -48,7 +48,7 @@ async def _execute_als_command(als_client, command: str) -> Any:
     )
 
 
-async def handle_project_info(als_client, gpr_file: str) -> dict[str, Any]:
+async def handle_project_info(als_client: ALSClient, gpr_file: str) -> dict[str, Any]:
     """Handle ada_project_info tool request.
 
     Args:
@@ -113,7 +113,11 @@ async def handle_project_info(als_client, gpr_file: str) -> dict[str, Any]:
 
 
 async def handle_call_hierarchy(
-    als_client, file: str, line: int, column: int, direction: str = "outgoing"
+    als_client: ALSClient,
+    file: str,
+    line: int,
+    column: int,
+    direction: str = "outgoing",
 ) -> dict[str, Any]:
     """Handle ada_call_hierarchy tool request.
 

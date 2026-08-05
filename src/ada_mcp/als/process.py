@@ -7,6 +7,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ada_mcp.als.client import ALSClient
 
@@ -36,7 +37,7 @@ class ALSHealthMonitor:
     # State tracking
     restart_count: int = field(default=0, init=False)
     last_restart_time: float = field(default=0.0, init=False)
-    _monitor_task: asyncio.Task | None = field(default=None, init=False)
+    _monitor_task: asyncio.Task[None] | None = field(default=None, init=False)
     _shutdown_requested: bool = field(default=False, init=False)
     _on_restart_callback: Callable[["ALSClient"], None] | None = field(default=None, init=False)
 
@@ -335,7 +336,7 @@ async def start_als(
     # Send initialize request
     root_uri = project_root.as_uri()
 
-    init_params = {
+    init_params: dict[str, Any] = {
         "processId": os.getpid(),
         "capabilities": {
             "textDocument": {
@@ -459,8 +460,6 @@ async def start_als(
 
     # Store configuration for potential restarts
     client._project_root = project_root
-    client._als_path = resolved_als_path
-    client._gpr_file = gpr_file
     client.set_project_source_baseline(project_root)
 
     return client

@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -91,9 +93,9 @@ class ALSPool:
         self.idle_timeout = idle_timeout
         self._instances: dict[Path, ALSInstance] = {}
         self._pool_lock = asyncio.Lock()
-        self._cleanup_task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task[None] | None = None
 
-    def _create_restart_callback(self, project_root: Path):
+    def _create_restart_callback(self, project_root: Path) -> Callable[[ALSClient], None]:
         """Create a restart callback for a specific project."""
 
         def callback(new_client: ALSClient) -> None:
@@ -241,7 +243,7 @@ class ALSPool:
             for root in list(self._instances.keys()):
                 await self._shutdown_instance(root)
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> dict[str, Any]:
         """Get pool statistics."""
         import time
 
@@ -278,7 +280,7 @@ async def shutdown_als_client() -> None:
     await _als_pool.shutdown_all()
 
 
-@server.list_tools()
+@server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
 async def list_tools() -> list[Tool]:
     """Return list of available Ada tools."""
     return [
@@ -735,8 +737,8 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+@server.call_tool()  # type: ignore[untyped-decorator]
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool invocations."""
     logger.debug(f"Tool called: {name} with args: {arguments}")
 

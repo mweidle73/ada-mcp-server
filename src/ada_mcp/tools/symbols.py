@@ -203,7 +203,7 @@ def _flatten_document_symbols(
     item: dict[str, Any],
     file: str,
     query: str,
-    kind_filter: set[int] | None,
+    kind_filter: set[SymbolKind] | None,
 ) -> list[dict[str, Any]]:
     """Flatten matching symbols from one open document."""
     symbols = []
@@ -284,7 +284,7 @@ def _convert_symbol_information(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _get_kind_filter(kind: str) -> set[int] | None:
+def _get_kind_filter(kind: str) -> set[SymbolKind] | None:
     """Get set of SymbolKind values to include based on filter string."""
     if kind == "all":
         return None
@@ -303,7 +303,7 @@ def _get_kind_filter(kind: str) -> set[int] | None:
 
 def _kind_to_string(kind: int) -> str:
     """Convert LSP SymbolKind to human-readable string."""
-    kind_names = {
+    kind_names: dict[int, str] = {
         SymbolKind.FILE: "file",
         SymbolKind.MODULE: "module",
         SymbolKind.NAMESPACE: "namespace",
