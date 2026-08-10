@@ -305,6 +305,23 @@ async def start_als(
 
     scenario_variables = get_project_scenario_variables()
 
+    # Current ALS releases can pull settings through workspace/configuration
+    # while initialization is still in progress. Prepare the same settings
+    # that are pushed after initialization before starting the read loop.
+    ada_settings: dict[str, str | bool | dict[str, str]] = {}
+    if gpr_file and gpr_file.exists():
+        resolved_root = project_root.resolve()
+        resolved_gpr = gpr_file.resolve()
+        try:
+            project_file = str(resolved_gpr.relative_to(resolved_root))
+        except ValueError:
+            project_file = str(resolved_gpr)
+        ada_settings["projectFile"] = project_file
+        if scenario_variables:
+            ada_settings["scenarioVariables"] = scenario_variables
+    else:
+        ada_settings["enableIndexing"] = False
+
     logger.info(f"Starting ALS: {resolved_als_path}")
     logger.info(f"Project root: {project_root}")
     if gpr_file:
@@ -329,6 +346,7 @@ async def start_als(
     )
 
     client = ALSClient(process=process)
+    client.set_workspace_configuration({"ada": ada_settings})
 
     # Start reading responses in background
     client.start_reading()
@@ -421,20 +439,6 @@ async def start_als(
     # Current ALS releases read project settings through the normal LSP
     # configuration channel. Keep initializationOptions above for compatibility
     # with older releases, but also configure the active server explicitly.
-    ada_settings: dict[str, str | bool | dict[str, str]] = {}
-    if gpr_file and gpr_file.exists():
-        resolved_root = project_root.resolve()
-        resolved_gpr = gpr_file.resolve()
-        try:
-            project_file = str(resolved_gpr.relative_to(resolved_root))
-        except ValueError:
-            project_file = str(resolved_gpr)
-        ada_settings["projectFile"] = project_file
-        if scenario_variables:
-            ada_settings["scenarioVariables"] = scenario_variables
-    else:
-        ada_settings["enableIndexing"] = False
-
     await client.send_notification(
         "workspace/didChangeConfiguration",
         {"settings": {"ada": ada_settings}},

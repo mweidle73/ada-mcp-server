@@ -41,6 +41,61 @@ async def test_write_failure_removes_pending_request():
 
 
 @pytest.mark.asyncio
+async def test_workspace_configuration_returns_selected_project_settings():
+    """ALS pull requests retain the project settings pushed at startup."""
+    process = MagicMock()
+    process.returncode = None
+    client = ALSClient(process)
+    client._write_message = AsyncMock()
+    client.set_workspace_configuration(
+        {
+            "ada": {
+                "projectFile": "sample.gpr",
+                "scenarioVariables": {"BUILD_MODE": "analysis"},
+            }
+        }
+    )
+
+    await client._handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "workspace/configuration",
+            "params": {
+                "items": [
+                    {"section": "ada"},
+                    {"section": "ada.projectFile"},
+                    {"section": "ada.scenarioVariables"},
+                    {"section": "ada.unknown"},
+                    {},
+                ]
+            },
+        }
+    )
+
+    response = client._write_message.await_args.args[0]
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": [
+            {
+                "projectFile": "sample.gpr",
+                "scenarioVariables": {"BUILD_MODE": "analysis"},
+            },
+            "sample.gpr",
+            {"BUILD_MODE": "analysis"},
+            None,
+            {
+                "ada": {
+                    "projectFile": "sample.gpr",
+                    "scenarioVariables": {"BUILD_MODE": "analysis"},
+                }
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_indexing_waits_for_progress_end():
     """Workspace readiness follows ALS work-done progress."""
     process = MagicMock()

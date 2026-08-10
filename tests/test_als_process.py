@@ -57,6 +57,9 @@ async def test_start_als_configures_project_through_lsp(tmp_path):
         "workspace/didChangeConfiguration",
         {"settings": {"ada": {"projectFile": "sample.gpr"}}},
     )
+    client.set_workspace_configuration.assert_called_once_with(
+        {"ada": {"projectFile": "sample.gpr"}}
+    )
     initialize_params = client.send_request.await_args_list[0].args[1]
     assert initialize_params["capabilities"]["workspace"]["didChangeWatchedFiles"] == {
         "dynamicRegistration": True,
@@ -84,6 +87,14 @@ async def test_start_als_configures_scenario_variables(tmp_path, monkeypatch, ca
                 }
             }
         },
+    )
+    client.set_workspace_configuration.assert_called_once_with(
+        {
+            "ada": {
+                "projectFile": "sample.gpr",
+                "scenarioVariables": {"BUILD_MODE": "analysis"},
+            }
+        }
     )
     initialize_params = client.send_request.await_args_list[0].args[1]
     assert initialize_params["capabilities"]["workspace"]["didChangeWatchedFiles"] == {

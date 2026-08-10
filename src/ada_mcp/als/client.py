@@ -1,6 +1,7 @@
 """Async client for communicating with Ada Language Server via LSP."""
 
 import asyncio
+import copy
 import json
 import logging
 from pathlib import Path
@@ -34,6 +35,11 @@ class ALSClient:
         self._read_task: asyncio.Task[None] | None = None
         self._initialized = False
         self._server_capabilities: dict[str, Any] = {}
+
+        # ALS requests configuration through workspace/configuration after
+        # initialization. Keep the settings selected for this client so that
+        # the pull response cannot erase a preceding pushed configuration.
+        self._workspace_configuration: dict[str, Any] = {}
 
         # Diagnostics are pushed via notifications, store them here
         self._diagnostics: dict[str, list[Diagnostic]] = {}
@@ -76,6 +82,28 @@ class ALSClient:
             for source in resolved_root.rglob(pattern)
             if source.is_file()
         }
+
+    def set_workspace_configuration(self, settings: dict[str, Any]) -> None:
+        """Store the settings returned to ALS configuration requests."""
+        self._workspace_configuration = copy.deepcopy(settings)
+
+    def _workspace_configuration_values(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[Any]:
+        """Resolve LSP configuration sections for this project client."""
+        values: list[Any] = []
+        for item in items:
+            section = item.get("section")
+            value: Any = self._workspace_configuration
+            if section:
+                for component in section.split("."):
+                    if not isinstance(value, dict) or component not in value:
+                        value = None
+                        break
+                    value = value[component]
+            values.append(copy.deepcopy(value))
+        return values
 
     def is_new_project_source(self, source: Path) -> bool:
         """Return whether a source appeared below the project root since startup."""
@@ -265,9 +293,11 @@ class ALSClient:
                 # Accept capability registration silently
                 await self._send_response(request_id, result=None)
             elif method == "workspace/configuration":
-                # Return empty config for each requested item
                 items = params.get("items", [])
-                await self._send_response(request_id, result=[{} for _ in items])
+                await self._send_response(
+                    request_id,
+                    result=self._workspace_configuration_values(items),
+                )
             elif method == "window/workDoneProgress/create":
                 # Accept progress token creation
                 await self._send_response(request_id, result=None)
