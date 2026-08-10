@@ -1,5 +1,8 @@
 """Tests for the MCP server module."""
 
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 
@@ -25,8 +28,6 @@ async def test_list_tools():
 @pytest.mark.asyncio
 async def test_call_tool_unknown():
     """Test that calling unknown tool returns error."""
-    import json
-
     from ada_mcp.server import call_tool
 
     result = await call_tool("unknown_tool", {})
@@ -39,8 +40,6 @@ async def test_call_tool_unknown():
 @pytest.mark.asyncio
 async def test_call_tool_goto_definition():
     """Test ada_goto_definition tool call."""
-    import json
-
     from ada_mcp.server import call_tool
 
     result = await call_tool(
@@ -56,3 +55,40 @@ async def test_call_tool_goto_definition():
     data = json.loads(result[0].text)
     # Currently returns "not implemented" - update when ALS is integrated
     assert "found" in data or "error" in data
+
+
+@pytest.mark.asyncio
+async def test_project_load_failure_discards_cached_client():
+    """A failed project view must not remain cached after the request."""
+    from ada_mcp.server import call_tool
+
+    client = MagicMock()
+    incomplete = {
+        "complete": False,
+        "reason": "project-load-failed",
+        "project_file": "/test/project/abuild.gpr",
+    }
+
+    with (
+        patch(
+            "ada_mcp.server.get_als_client",
+            new_callable=AsyncMock,
+            return_value=client,
+        ),
+        patch(
+            "ada_mcp.server.handle_project_info",
+            new_callable=AsyncMock,
+            return_value=incomplete,
+        ),
+        patch(
+            "ada_mcp.server._als_pool.discard_client",
+            new_callable=AsyncMock,
+        ) as discard,
+    ):
+        result = await call_tool(
+            "ada_project_info",
+            {"gpr_file": "/test/project/abuild.gpr"},
+        )
+
+    discard.assert_awaited_once_with("/test/project/abuild.gpr", client)
+    assert json.loads(result[0].text) == incomplete

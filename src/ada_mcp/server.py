@@ -105,6 +105,16 @@ class ALSPool:
 
         return callback
 
+    @staticmethod
+    def _project_root(file_path: str | None) -> Path:
+        """Resolve the project root used as this pool's cache key."""
+        project_root_env = os.environ.get("ADA_PROJECT_ROOT")
+        if project_root_env:
+            return Path(project_root_env)
+        if file_path:
+            return find_project_root(Path(file_path))
+        return Path.cwd()
+
     async def get_client(self, file_path: str | None = None) -> ALSClient:
         """
         Get an ALS client for the project containing the given file.
@@ -117,14 +127,7 @@ class ALSPool:
         """
         import time
 
-        # Determine project root
-        project_root_env = os.environ.get("ADA_PROJECT_ROOT")
-        if project_root_env:
-            project_root = Path(project_root_env)
-        elif file_path:
-            project_root = find_project_root(Path(file_path))
-        else:
-            project_root = Path.cwd()
+        project_root = self._project_root(file_path)
 
         async with self._pool_lock:
             # Check if we already have an instance for this project
@@ -171,6 +174,21 @@ class ALSPool:
             except Exception as e:
                 logger.exception(f"Failed to start ALS for {project_root}: {e}")
                 raise
+
+    async def discard_client(
+        self,
+        file_path: str | None,
+        client: ALSClient,
+    ) -> None:
+        """Discard a cached client whose evaluated project view is invalid."""
+        project_root = self._project_root(file_path)
+        async with self._pool_lock:
+            instance = self._instances.get(project_root)
+            if instance is None or instance.client is not client:
+                return
+
+            logger.info("Discarding invalid ALS project view for %s", project_root)
+            await self._shutdown_instance(project_root)
 
     async def _evict_if_needed(self) -> None:
         """Evict oldest instance if at capacity."""
@@ -911,6 +929,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "error": f"Unknown tool: {name}",
                     "available_tools": "Use list_tools to see available tools",
                 }
+
+        if name == "ada_project_info" and result.get("reason") == "project-load-failed":
+            # A project may become valid after generated files or imported
+            # projects are prepared. Do not preserve ALS's failed project view
+            # in the pool; the next request must evaluate the current tree.
+            await _als_pool.discard_client(file_path, client)
 
     except Exception as e:
         logger.exception(f"Error executing tool {name}: {e}")

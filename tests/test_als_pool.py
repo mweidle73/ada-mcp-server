@@ -112,6 +112,71 @@ class TestALSPool:
             assert mock_start.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_discard_client_reloads_failed_project_view(self):
+        """A rejected cached client is replaced on the next request."""
+        pool = ALSPool()
+        clients = [MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[(clients[0], monitor), (clients[1], monitor)],
+            ) as mock_start,
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=Path("/test/project"),
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ) as mock_shutdown,
+        ):
+            first = await pool.get_client("/test/project/abuild.gpr")
+            await pool.discard_client("/test/project/abuild.gpr", first)
+            second = await pool.get_client("/test/project/abuild.gpr")
+
+        assert first is clients[0]
+        assert second is clients[1]
+        assert mock_start.call_count == 2
+        mock_shutdown.assert_awaited_once_with(clients[0], monitor)
+
+    @pytest.mark.asyncio
+    async def test_discard_client_preserves_replacement(self):
+        """A stale request cannot discard a newer monitor replacement."""
+        pool = ALSPool()
+        old_client = MagicMock()
+        new_client = MagicMock()
+        old_client.is_running = True
+        new_client.is_running = True
+        monitor = MagicMock()
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                return_value=(old_client, monitor),
+            ),
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=Path("/test/project"),
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ) as mock_shutdown,
+        ):
+            await pool.get_client("/test/project/abuild.gpr")
+            pool._instances[Path("/test/project")].client = new_client
+            await pool.discard_client("/test/project/abuild.gpr", old_client)
+
+        assert pool._instances[Path("/test/project")].client is new_client
+        mock_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_get_client_different_projects(self):
         """Test that different projects get different instances."""
         pool = ALSPool()
