@@ -10,6 +10,10 @@
 > Its server changes are deliberately project-neutral and are candidates for
 > submission upstream; Abuild-specific project configuration remains in the
 > Abuild repository.
+>
+> See the [maintained fork patch series](MAINTAINED_FORK.md) for the exact
+> downstream commits, their purpose, and the distinction between server
+> changes and fork-maintenance changes.
 
 The fork uses three branches with distinct responsibilities:
 
