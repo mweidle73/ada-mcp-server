@@ -62,6 +62,30 @@ async def test_edited_source_is_synchronized_with_did_change(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_forced_source_sync_resends_unchanged_text(tmp_path):
+    """A forced sync refreshes project-dependent semantic results."""
+    source = tmp_path / "sample.adb"
+    source.write_text("procedure Sample is begin null; end Sample;\n")
+    client = _mock_client()
+    clear_open_files_cache()
+
+    assert await _ensure_file_open(client, str(source)) is True
+    assert (
+        await _ensure_file_open(
+            client,
+            str(source),
+            force_change=True,
+        )
+        is True
+    )
+
+    method, params = client.send_notification.await_args_list[1].args
+    assert method == "textDocument/didChange"
+    assert params["textDocument"]["version"] == 2
+    assert params["contentChanges"] == [{"text": source.read_text()}]
+
+
+@pytest.mark.asyncio
 async def test_parallel_source_sync_sends_one_did_open(tmp_path):
     """Parallel semantic requests must share one LSP document lifecycle."""
     source = tmp_path / "sample.ads"

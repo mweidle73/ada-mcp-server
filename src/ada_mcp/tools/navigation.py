@@ -432,7 +432,11 @@ async def _prune_deleted_open_files(client: ALSClient) -> None:
             await _ensure_file_open(client, file_path)
 
 
-async def _ensure_file_open(client: ALSClient, file_path: str) -> bool | None:
+async def _ensure_file_open(
+    client: ALSClient,
+    file_path: str,
+    force_change: bool = False,
+) -> bool | None:
     """
     Synchronize a file with ALS.
 
@@ -444,10 +448,14 @@ async def _ensure_file_open(client: ALSClient, file_path: str) -> bool | None:
     # follow this short synchronization step.
     client_lock = _open_file_locks.setdefault(client, asyncio.Lock())
     async with client_lock:
-        return await _synchronize_file(client, file_path)
+        return await _synchronize_file(client, file_path, force_change)
 
 
-async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
+async def _synchronize_file(
+    client: ALSClient,
+    file_path: str,
+    force_change: bool,
+) -> bool | None:
     """Synchronize one file while holding its ALS client's document lock."""
     file_uri = file_to_uri(file_path)
     client_open_files = _open_files.setdefault(client, {})
@@ -516,7 +524,7 @@ async def _synchronize_file(client: ALSClient, file_path: str) -> bool | None:
     text = path.read_text()
     open_file = client_open_files.get(file_uri)
     if open_file is not None:
-        if open_file.text == text:
+        if open_file.text == text and not force_change:
             return False
 
         version = open_file.version + 1

@@ -34,7 +34,15 @@ async def handle_diagnostics(
 
         file_uri = file_to_uri(file)
         generation = await client.diagnostics_generation(file_uri)
-        synchronized = await _ensure_file_open(client, file)
+        # A changed package dependency does not necessarily make ALS publish
+        # fresh diagnostics for an unchanged open body. Resend that body for
+        # every explicit file-diagnostic request so the result includes the
+        # current project context, not only the current document text.
+        synchronized = await _ensure_file_open(
+            client,
+            file,
+            force_change=True,
+        )
 
         if synchronized is None:
             return _unavailable_result(
