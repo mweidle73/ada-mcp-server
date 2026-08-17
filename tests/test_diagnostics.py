@@ -48,6 +48,12 @@ async def test_file_diagnostics_are_complete_after_publication(tmp_path):
         after_generation=0,
     )
 
+    await handle_diagnostics(client, file=str(source))
+    method, params = client.send_notification.await_args_list[1].args
+    assert method == "textDocument/didChange"
+    assert params["textDocument"]["version"] == 2
+    assert params["contentChanges"] == [{"text": source.read_text()}]
+
 
 @pytest.mark.asyncio
 async def test_file_diagnostics_fail_loud_without_publication(tmp_path):

@@ -37,6 +37,7 @@ themselves are maintained in the Abuild repository.
 | `0016` | [`a978da3`](https://github.com/mweidle73/ada-mcp-server/commit/a978da3a6aae9fb644fd204c51f325e324d669bb) | Complete the strict source-package type contract without changing the MCP representation. |
 | `0017` | [`a2b4bd7`](https://github.com/mweidle73/ada-mcp-server/commit/a2b4bd765f6fab39f863d4d379d0cb88ab41b2b8) | Return the selected project settings when ALS pulls workspace configuration during initialization. |
 | `0018` | [`eeb53ca`](https://github.com/mweidle73/ada-mcp-server/commit/eeb53ca68b340c8fb5b53e11a7e1bd938c430316) | Discard a failed ALS project instance so repaired GPR project views are evaluated by the next request. |
+| `0019` | [`8ef1c77`](https://github.com/mweidle73/ada-mcp-server/commit/8ef1c770a0d746bf4b3faff2b910ec96a57de1c0) | Refresh explicit file diagnostics after a dependency source changes while retaining the navigation document cache. |
 
 All entries are fork-only relative to the upstream history mirrored by `main`.
 Here, *fork-only* means that the commit is absent from that mirrored history;
