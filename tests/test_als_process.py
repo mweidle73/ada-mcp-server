@@ -1,6 +1,7 @@
 """Tests for ALS process management and health monitoring."""
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,7 +9,9 @@ import pytest
 
 from ada_mcp.als.process import (
     ALSHealthMonitor,
+    ALSProjectContext,
     get_project_scenario_variables,
+    resolve_project_context,
     start_als,
 )
 
@@ -128,6 +131,77 @@ def test_project_scenario_variables_reject_invalid_values(monkeypatch, value):
         get_project_scenario_variables()
 
 
+def test_project_context_merges_defaults_and_normalizes_paths(tmp_path, monkeypatch):
+    """A project view freezes ordered paths and effective scenario values."""
+    first_path = tmp_path / "first"
+    second_path = tmp_path / "second"
+    first_path.mkdir()
+    second_path.mkdir()
+    monkeypatch.setenv(
+        "ADA_PROJECT_SCENARIO_VARIABLES",
+        '{"BUILD_MODE":"analysis","OS":"bsd"}',
+    )
+
+    context = resolve_project_context(
+        project_paths=[str(first_path), str(second_path), str(first_path)],
+        scenario_variables={"OS": "linux", "TARGET_ARCH": "x86_64"},
+    )
+
+    assert context.project_paths == (first_path.resolve(), second_path.resolve())
+    assert context.scenario_map() == {
+        "BUILD_MODE": "analysis",
+        "OS": "linux",
+        "TARGET_ARCH": "x86_64",
+    }
+
+
+@pytest.mark.parametrize("project_path", ["relative", "/missing/project/path"])
+def test_project_context_rejects_unusable_paths(project_path):
+    """A GPR search path must identify an existing absolute directory."""
+    with pytest.raises(ValueError, match="GPR project search path"):
+        resolve_project_context(project_paths=[project_path])
+
+
+@pytest.mark.asyncio
+async def test_start_als_replaces_gpr_project_path(tmp_path, monkeypatch):
+    """The selected view gets its exact GPR search path in the ALS process."""
+    gpr_file = tmp_path / "sample.gpr"
+    gpr_file.write_text("project Sample is end Sample;\n")
+    dependency_path = tmp_path / "dependency"
+    dependency_path.mkdir()
+    monkeypatch.setenv("GPR_PROJECT_PATH", "/wrong/worktree")
+    process = MagicMock()
+    client = MagicMock()
+    client.send_request = AsyncMock(return_value={"capabilities": {}})
+    client.send_notification = AsyncMock()
+    spawn = AsyncMock(return_value=process)
+    context = resolve_project_context(
+        project_paths=[str(dependency_path)],
+        scenario_variables={"OS": "linux"},
+    )
+
+    with (
+        patch(
+            "ada_mcp.als.process.asyncio.create_subprocess_exec",
+            new=spawn,
+        ),
+        patch("ada_mcp.als.process.ALSClient", return_value=client),
+        patch("ada_mcp.als.process.asyncio.sleep", new=AsyncMock()),
+    ):
+        await start_als(
+            tmp_path,
+            als_path="/test/ada_language_server",
+            gpr_file=gpr_file,
+            project_context=context,
+        )
+
+    child_environment = spawn.await_args.kwargs["env"]
+    assert child_environment["GPR_PROJECT_PATH"] == str(dependency_path)
+    assert os.environ["GPR_PROJECT_PATH"] == "/wrong/worktree"
+    initialize_params = client.send_request.await_args_list[0].args[1]
+    assert initialize_params["initializationOptions"]["scenarioVariables"] == {"OS": "linux"}
+
+
 class TestALSHealthMonitor:
     """Tests for ALSHealthMonitor class."""
 
@@ -188,6 +262,35 @@ class TestALSHealthMonitor:
         # Clean up
         monitor.stop_monitoring()
         await asyncio.sleep(0.1)
+
+    @pytest.mark.asyncio
+    async def test_restart_retains_project_context(self, monitor, mock_client):
+        """An automatic ALS restart must retain the selected GPR environment."""
+        context = ALSProjectContext(
+            project_paths=(Path("/test/dependency"),),
+            scenario_variables=(("OS", "linux"),),
+        )
+        monitor.project_context = context
+        mock_client.is_running = False
+        replacement = MagicMock()
+        replacement.is_running = False
+
+        with (
+            patch(
+                "ada_mcp.als.process.start_als",
+                new_callable=AsyncMock,
+                return_value=replacement,
+            ) as restart,
+            patch("ada_mcp.als.process.asyncio.sleep", new=AsyncMock()),
+        ):
+            await monitor._handle_crash()
+
+        restart.assert_awaited_once_with(
+            monitor.project_root,
+            als_path=monitor.als_path,
+            gpr_file=monitor.gpr_file,
+            project_context=context,
+        )
 
     @pytest.mark.asyncio
     async def test_exponential_backoff_calculation(self, monitor):

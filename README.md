@@ -429,13 +429,25 @@ Build the project with GPRbuild.
 
 Select an exact GPR project and return its evaluated structure. Later
 file-based tools below the same project root reuse this view until another GPR
-project is selected and validated.
+project is selected and validated. Projects which rely on build-orchestrator
+state may also provide their ordered GPR search directories and scenario
+variables. The search directories replace the inherited `GPR_PROJECT_PATH`;
+scenario entries override the server's configured defaults for this view.
 
 ```json
 {
-  "gpr_file": "/project/project.gpr"
+  "gpr_file": "/project/project.gpr",
+  "project_paths": ["/project/dependencies/anet"],
+  "scenario_variables": {
+    "OS": "linux",
+    "TARGET_ARCH": "x86_64"
+  }
 }
 ```
+
+The validated project file, search path and effective scenario map form one
+cached view. An automatic ALS restart and later file-based tools therefore
+cannot silently fall back to another worktree's dependency or scenario.
 
 **Response:**
 ```json
@@ -553,6 +565,8 @@ Get call relationships for a subprogram.
 Scenario-variable values are forwarded to ALS but are deliberately omitted
 from logs. Only their names are logged, so build-mode selections can be
 diagnosed without exposing values that may be sensitive in another project.
+Per-view values supplied to `ada_project_info` override matching entries from
+`ADA_PROJECT_SCENARIO_VARIABLES` without modifying the server environment.
 
 ### Logging
 

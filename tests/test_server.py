@@ -25,6 +25,17 @@ async def test_list_tools():
     project_info = next(tool for tool in tools if tool.name == "ada_project_info")
     assert project_info.inputSchema["required"] == ["gpr_file"]
     assert "reuse the validated selection" in project_info.description
+    assert project_info.inputSchema["properties"]["project_paths"] == {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Ordered absolute GPR search directories; when provided, "
+            "replace the inherited GPR_PROJECT_PATH"
+        ),
+    }
+    assert project_info.inputSchema["properties"]["scenario_variables"]["additionalProperties"] == {
+        "type": "string"
+    }
 
 
 @pytest.mark.asyncio
@@ -95,6 +106,8 @@ async def test_project_load_failure_discards_cached_client():
     get_client.assert_awaited_once_with(
         file_path="/test/project/abuild.gpr",
         gpr_file="/test/project/abuild.gpr",
+        project_paths=None,
+        scenario_variables=None,
     )
     discard.assert_awaited_once_with("/test/project/abuild.gpr", client)
     assert json.loads(result[0].text) == incomplete
@@ -133,6 +146,71 @@ async def test_project_info_selects_validated_client():
 
     select.assert_awaited_once_with(client)
     assert json.loads(result[0].text) == complete
+
+
+@pytest.mark.asyncio
+async def test_project_info_forwards_project_context():
+    """An explicit project environment reaches the ALS pool unchanged."""
+    from ada_mcp.server import call_tool
+
+    client = MagicMock()
+    complete = {
+        "complete": True,
+        "project_file": "/test/project/spawn_manager.gpr",
+    }
+    arguments = {
+        "gpr_file": "/test/project/spawn_manager.gpr",
+        "project_paths": ["/test/project/anet"],
+        "scenario_variables": {"OS": "linux", "VERSION": ""},
+    }
+    with (
+        patch(
+            "ada_mcp.server.get_als_client",
+            new_callable=AsyncMock,
+            return_value=client,
+        ) as get_client,
+        patch(
+            "ada_mcp.server.handle_project_info",
+            new_callable=AsyncMock,
+            return_value=complete,
+        ),
+        patch(
+            "ada_mcp.server._als_pool.select_client",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await call_tool("ada_project_info", arguments)
+
+    get_client.assert_awaited_once_with(
+        file_path=arguments["gpr_file"],
+        gpr_file=arguments["gpr_file"],
+        project_paths=arguments["project_paths"],
+        scenario_variables=arguments["scenario_variables"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_info_reports_invalid_context():
+    """Invalid project context is distinguished from an ALS connection failure."""
+    from ada_mcp.server import call_tool
+
+    with patch(
+        "ada_mcp.server.get_als_client",
+        new_callable=AsyncMock,
+        side_effect=ValueError("GPR project search paths must be absolute"),
+    ):
+        result = await call_tool(
+            "ada_project_info",
+            {
+                "gpr_file": "/test/project/spawn_manager.gpr",
+                "project_paths": ["relative/anet"],
+            },
+        )
+
+    data = json.loads(result[0].text)
+    assert data["error"] == "GPR project search paths must be absolute"
+    assert "absolute GPR project directories" in data["hint"]
+    assert "Failed to connect" not in data["error"]
 
 
 @pytest.mark.asyncio
