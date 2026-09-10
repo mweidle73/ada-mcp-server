@@ -39,6 +39,7 @@ themselves are maintained in the Abuild repository.
 | `0018` | [`eeb53ca`](https://github.com/mweidle73/ada-mcp-server/commit/eeb53ca68b340c8fb5b53e11a7e1bd938c430316) | Discard a failed ALS project instance so repaired GPR project views are evaluated by the next request. |
 | `0019` | [`8ef1c77`](https://github.com/mweidle73/ada-mcp-server/commit/8ef1c770a0d746bf4b3faff2b910ec96a57de1c0) | Refresh explicit file diagnostics after a dependency source changes while retaining the navigation document cache. |
 | `0020` | [`1218f45`](https://github.com/mweidle73/ada-mcp-server/commit/1218f455c78b05512f95c7e7dc12ef5468d36c5a) | Select an exact GPR project view and retain it for subsequent file tools. |
+| `0021` | [`ae71c6b`](https://github.com/mweidle73/ada-mcp-server/commit/ae71c6bfa52add85f466ccfa0477f398bb970e15) | Apply the maintained source format to the project-view pool lookup. |
 
 All entries are fork-only relative to the upstream history mirrored by `main`.
 Here, *fork-only* means that the commit is absent from that mirrored history;
