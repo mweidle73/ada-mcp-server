@@ -16,7 +16,9 @@ from mcp.types import TextContent, Tool
 from ada_mcp.als.client import ALSClient
 from ada_mcp.als.process import (
     ALSHealthMonitor,
+    ALSProjectContext,
     find_project_root,
+    resolve_project_context,
     shutdown_als,
     start_als_with_monitoring,
 )
@@ -50,7 +52,7 @@ from ada_mcp.tools.refactoring import (
 
 logger = logging.getLogger(__name__)
 
-ProjectKey = tuple[Path, Path | None]
+ProjectKey = tuple[Path, Path | None, ALSProjectContext]
 
 # Create the MCP server instance
 server = Server("ada-mcp-server")
@@ -71,8 +73,17 @@ class ALSInstance:
     monitor: ALSHealthMonitor | None
     project_root: Path
     project_file: Path | None
+    project_context: ALSProjectContext
     last_used: float  # timestamp
     lock: asyncio.Lock  # per-instance lock for operations
+
+
+@dataclass(frozen=True)
+class ProjectSelection:
+    """Validated GPR file and the exact environment used to evaluate it."""
+
+    project_file: Path
+    project_context: ALSProjectContext
 
 
 class ALSPool:
@@ -97,7 +108,7 @@ class ALSPool:
         self._instances: dict[ProjectKey, ALSInstance] = {}
         # Guarded by _pool_lock. File-only tools reuse the last GPR selected
         # explicitly for their project root, including after LRU eviction.
-        self._selected_projects: dict[Path, Path] = {}
+        self._selected_projects: dict[Path, ProjectSelection] = {}
         self._pool_lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
 
@@ -125,6 +136,8 @@ class ALSPool:
         self,
         file_path: str | None = None,
         gpr_file: str | Path | None = None,
+        project_paths: list[str] | None = None,
+        scenario_variables: dict[str, str] | None = None,
     ) -> ALSClient:
         """
         Get an ALS client for the project containing the given file.
@@ -132,6 +145,8 @@ class ALSPool:
         Args:
             file_path: File path to determine project from
             gpr_file: Explicit GPR project selected by ada_project_info
+            project_paths: Exact GPR project search path for this view
+            scenario_variables: Per-view overrides for configured scenarios
 
         Returns:
             ALSClient for the appropriate project
@@ -140,21 +155,42 @@ class ALSPool:
 
         project_root = self._project_root(file_path)
         requested_project = Path(gpr_file).resolve() if gpr_file else None
+        requested_context = resolve_project_context(
+            project_paths=project_paths,
+            scenario_variables=scenario_variables,
+        )
 
         async with self._pool_lock:
-            project_file = requested_project or self._selected_projects.get(project_root)
-            project_key = (project_root, project_file)
+            selected_project = self._selected_projects.get(project_root)
+            if requested_project is not None:
+                project_file = requested_project
+                project_context = requested_context
+            elif selected_project is not None:
+                project_file = selected_project.project_file
+                project_context = selected_project.project_context
+            else:
+                project_file = None
+                project_context = requested_context
+            project_key = (project_root, project_file, project_context)
 
             # Check if we already have an instance for this project
             if project_key in self._instances:
                 instance = self._instances[project_key]
                 if instance.client.is_running:
                     instance.last_used = time.time()
-                    logger.debug(f"Reusing ALS for project: {project_key}")
+                    logger.debug(
+                        "Reusing ALS for project root %s and GPR %s",
+                        project_key[0],
+                        project_key[1],
+                    )
                     return instance.client
                 else:
                     # Instance died, remove it
-                    logger.warning(f"ALS instance for {project_key} died, removing")
+                    logger.warning(
+                        "ALS instance for project root %s and GPR %s died, removing",
+                        project_key[0],
+                        project_key[1],
+                    )
                     del self._instances[project_key]
 
             # Need to create a new instance
@@ -167,6 +203,7 @@ class ALSPool:
                 client, monitor = await start_als_with_monitoring(
                     project_root,
                     gpr_file=project_file,
+                    project_context=project_context,
                     on_restart=self._create_restart_callback(project_key),
                 )
 
@@ -175,6 +212,7 @@ class ALSPool:
                     monitor=monitor,
                     project_root=project_root,
                     project_file=project_file,
+                    project_context=project_context,
                     last_used=time.time(),
                     lock=asyncio.Lock(),
                 )
@@ -206,7 +244,10 @@ class ALSPool:
             project_key = self._key_for_client(client)
             if project_key is None or project_key[1] is None:
                 raise RuntimeError("explicit ALS project client is not cached")
-            self._selected_projects[project_key[0]] = project_key[1]
+            self._selected_projects[project_key[0]] = ProjectSelection(
+                project_file=project_key[1],
+                project_context=project_key[2],
+            )
 
     async def discard_client(
         self,
@@ -219,10 +260,19 @@ class ALSPool:
             if project_key is None:
                 return
 
-            project_root, project_file = project_key
-            if self._selected_projects.get(project_root) == project_file:
+            project_root, project_file, project_context = project_key
+            rejected_selection = (
+                ProjectSelection(project_file, project_context)
+                if project_file is not None
+                else None
+            )
+            if self._selected_projects.get(project_root) == rejected_selection:
                 self._selected_projects.pop(project_root, None)
-            logger.info("Discarding invalid ALS project view for %s", project_key)
+            logger.info(
+                "Discarding invalid ALS project view for root %s and GPR %s",
+                project_root,
+                project_file,
+            )
             await self._shutdown_instance(project_key)
 
     async def _evict_if_needed(self) -> None:
@@ -241,7 +291,11 @@ class ALSPool:
                 oldest_key = key
 
         if oldest_key:
-            logger.info(f"Evicting ALS instance for {oldest_key} (LRU)")
+            logger.info(
+                "Evicting ALS instance for project root %s and GPR %s (LRU)",
+                oldest_key[0],
+                oldest_key[1],
+            )
             await self._shutdown_instance(oldest_key)
 
     async def _shutdown_instance(self, project_key: ProjectKey) -> None:
@@ -318,6 +372,14 @@ class ALSPool:
                     "project_file": (
                         str(inst.project_file) if inst.project_file is not None else None
                     ),
+                    "project_paths": (
+                        [str(path) for path in inst.project_context.project_paths]
+                        if inst.project_context.project_paths is not None
+                        else None
+                    ),
+                    "scenario_variables": [
+                        name for name, _ in inst.project_context.scenario_variables
+                    ],
                     "idle_seconds": now - inst.last_used,
                     "is_running": inst.client.is_running,
                 }
@@ -333,13 +395,20 @@ _als_pool = ALSPool(max_instances=3, idle_timeout=300.0)
 async def get_als_client(
     file_path: str | None = None,
     gpr_file: str | Path | None = None,
+    project_paths: list[str] | None = None,
+    scenario_variables: dict[str, str] | None = None,
 ) -> ALSClient:
     """
     Get an ALS client for the project containing the given file.
 
     This is a convenience wrapper around the ALS pool.
     """
-    return await _als_pool.get_client(file_path, gpr_file=gpr_file)
+    return await _als_pool.get_client(
+        file_path,
+        gpr_file=gpr_file,
+        project_paths=project_paths,
+        scenario_variables=scenario_variables,
+    )
 
 
 async def shutdown_als_client() -> None:
@@ -544,8 +613,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="ada_project_info",
             description=(
-                "Select an exact GPR project and return its evaluated "
-                "structure; later file tools reuse the validated selection"
+                "Select an exact GPR project with an optional per-view "
+                "environment and return its evaluated structure; later file "
+                "tools reuse the validated selection"
             ),
             inputSchema={
                 "type": "object",
@@ -553,6 +623,22 @@ async def list_tools() -> list[Tool]:
                     "gpr_file": {
                         "type": "string",
                         "description": "Absolute path to the .gpr project file",
+                    },
+                    "project_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Ordered absolute GPR search directories; when "
+                            "provided, replace the inherited GPR_PROJECT_PATH"
+                        ),
+                    },
+                    "scenario_variables": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "GPR scenario values which override configured "
+                            "defaults for this project view"
+                        ),
                     },
                 },
                 "required": ["gpr_file"],
@@ -810,14 +896,36 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()  # type: ignore[untyped-decorator]
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool invocations."""
-    logger.debug(f"Tool called: {name} with args: {arguments}")
+    logged_arguments = dict(arguments)
+    if "scenario_variables" in logged_arguments:
+        supplied_scenarios = logged_arguments["scenario_variables"]
+        logged_arguments["scenario_variables"] = (
+            sorted(supplied_scenarios) if isinstance(supplied_scenarios, dict) else "<invalid>"
+        )
+    logger.debug(f"Tool called: {name} with args: {logged_arguments}")
 
     # Extract file path from arguments for project detection
     file_path = arguments.get("file") or arguments.get("gpr_file")
     gpr_file = arguments.get("gpr_file") if name == "ada_project_info" else None
+    project_paths = arguments.get("project_paths") if name == "ada_project_info" else None
+    scenario_variables = arguments.get("scenario_variables") if name == "ada_project_info" else None
 
     try:
-        client = await get_als_client(file_path=file_path, gpr_file=gpr_file)
+        client = await get_als_client(
+            file_path=file_path,
+            gpr_file=gpr_file,
+            project_paths=project_paths,
+            scenario_variables=scenario_variables,
+        )
+    except ValueError as e:
+        error_result = {
+            "error": str(e),
+            "context": {"tool": name, "file": file_path},
+            "hint": (
+                "Provide existing absolute GPR project directories and string scenario values"
+            ),
+        }
+        return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
     except Exception as e:
         error_result = {
             "error": f"Failed to connect to ALS: {e}",
@@ -1001,7 +1109,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         logger.exception(f"Error executing tool {name}: {e}")
         result = {
             "error": str(e),
-            "context": {"tool": name, "arguments": arguments},
+            "context": {"tool": name, "arguments": logged_arguments},
         }
 
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
