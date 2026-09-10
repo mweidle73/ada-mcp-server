@@ -196,11 +196,7 @@ class ALSPool:
     def _key_for_client(self, client: ALSClient) -> ProjectKey | None:
         """Return the cached project-view key which owns a client."""
         return next(
-            (
-                key
-                for key, instance in self._instances.items()
-                if instance.client is client
-            ),
+            (key for key, instance in self._instances.items() if instance.client is client),
             None,
         )
 
