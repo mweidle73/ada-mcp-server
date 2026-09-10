@@ -184,7 +184,7 @@ python -m ada_mcp
 
 | Tool | Description |
 |------|-------------|
-| `ada_project_info` | Get project structure info |
+| `ada_project_info` | Select and inspect an exact GPR project view |
 | `ada_call_hierarchy` | Get incoming/outgoing calls |
 | `ada_dependency_graph` | Get package dependencies |
 
@@ -427,21 +427,26 @@ Build the project with GPRbuild.
 
 ### ada_project_info
 
-Get project structure information.
+Select an exact GPR project and return its evaluated structure. Later
+file-based tools below the same project root reuse this view until another GPR
+project is selected and validated.
 
 ```json
-{}
+{
+  "gpr_file": "/project/project.gpr"
+}
 ```
 
 **Response:**
 ```json
 {
-  "projectFile": "/project/project.gpr",
-  "projectName": "My_Project",
-  "sourceDirs": ["/project/src"],
-  "objectDir": "/project/obj",
-  "execDir": "/project/bin",
-  "mainUnits": ["main.adb"]
+  "project_file": "/project/project.gpr",
+  "project_name": "My_Project",
+  "source_dirs": ["/project/src"],
+  "object_dir": "/project/obj",
+  "exec_dir": "/project/bin",
+  "main_units": ["main.adb"],
+  "complete": true
 }
 ```
 

@@ -50,6 +50,8 @@ from ada_mcp.tools.refactoring import (
 
 logger = logging.getLogger(__name__)
 
+ProjectKey = tuple[Path, Path | None]
+
 # Create the MCP server instance
 server = Server("ada-mcp-server")
 
@@ -57,8 +59,8 @@ server = Server("ada-mcp-server")
 # Multi-Project ALS Pool
 # =============================================================================
 # Instead of a single global ALS, we maintain a pool of ALS instances,
-# one per project. This allows multiple users/projects to work simultaneously
-# without restarting ALS constantly.
+# one per selected project view. This allows multiple users/projects to work
+# simultaneously without restarting ALS constantly.
 
 
 @dataclass
@@ -68,13 +70,14 @@ class ALSInstance:
     client: ALSClient
     monitor: ALSHealthMonitor | None
     project_root: Path
+    project_file: Path | None
     last_used: float  # timestamp
     lock: asyncio.Lock  # per-instance lock for operations
 
 
 class ALSPool:
     """
-    Pool of ALS instances, one per project.
+    Pool of ALS instances, one per selected project view.
 
     Supports multiple concurrent projects with LRU eviction to limit
     memory usage. Each project gets its own ALS with proper Alire
@@ -91,17 +94,20 @@ class ALSPool:
         """
         self.max_instances = max_instances
         self.idle_timeout = idle_timeout
-        self._instances: dict[Path, ALSInstance] = {}
+        self._instances: dict[ProjectKey, ALSInstance] = {}
+        # Guarded by _pool_lock. File-only tools reuse the last GPR selected
+        # explicitly for their project root, including after LRU eviction.
+        self._selected_projects: dict[Path, Path] = {}
         self._pool_lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
 
-    def _create_restart_callback(self, project_root: Path) -> Callable[[ALSClient], None]:
-        """Create a restart callback for a specific project."""
+    def _create_restart_callback(self, project_key: ProjectKey) -> Callable[[ALSClient], None]:
+        """Create a restart callback for one selected project view."""
 
         def callback(new_client: ALSClient) -> None:
-            if project_root in self._instances:
-                self._instances[project_root].client = new_client
-                logger.info(f"ALS client updated after restart for {project_root}")
+            if project_key in self._instances:
+                self._instances[project_key].client = new_client
+                logger.info(f"ALS client updated after restart for {project_key[0]}")
 
         return callback
 
@@ -115,12 +121,17 @@ class ALSPool:
             return find_project_root(Path(file_path))
         return Path.cwd()
 
-    async def get_client(self, file_path: str | None = None) -> ALSClient:
+    async def get_client(
+        self,
+        file_path: str | None = None,
+        gpr_file: str | Path | None = None,
+    ) -> ALSClient:
         """
         Get an ALS client for the project containing the given file.
 
         Args:
             file_path: File path to determine project from
+            gpr_file: Explicit GPR project selected by ada_project_info
 
         Returns:
             ALSClient for the appropriate project
@@ -128,19 +139,23 @@ class ALSPool:
         import time
 
         project_root = self._project_root(file_path)
+        requested_project = Path(gpr_file).resolve() if gpr_file else None
 
         async with self._pool_lock:
+            project_file = requested_project or self._selected_projects.get(project_root)
+            project_key = (project_root, project_file)
+
             # Check if we already have an instance for this project
-            if project_root in self._instances:
-                instance = self._instances[project_root]
+            if project_key in self._instances:
+                instance = self._instances[project_key]
                 if instance.client.is_running:
                     instance.last_used = time.time()
-                    logger.debug(f"Reusing ALS for project: {project_root}")
+                    logger.debug(f"Reusing ALS for project: {project_key}")
                     return instance.client
                 else:
                     # Instance died, remove it
-                    logger.warning(f"ALS instance for {project_root} died, removing")
-                    del self._instances[project_root]
+                    logger.warning(f"ALS instance for {project_key} died, removing")
+                    del self._instances[project_key]
 
             # Need to create a new instance
             # First, check if we need to evict old instances
@@ -150,17 +165,20 @@ class ALSPool:
 
             try:
                 client, monitor = await start_als_with_monitoring(
-                    project_root, on_restart=self._create_restart_callback(project_root)
+                    project_root,
+                    gpr_file=project_file,
+                    on_restart=self._create_restart_callback(project_key),
                 )
 
                 instance = ALSInstance(
                     client=client,
                     monitor=monitor,
                     project_root=project_root,
+                    project_file=project_file,
                     last_used=time.time(),
                     lock=asyncio.Lock(),
                 )
-                self._instances[project_root] = instance
+                self._instances[project_key] = instance
 
                 # Give ALS time to index
                 await asyncio.sleep(1.0)
@@ -175,20 +193,37 @@ class ALSPool:
                 logger.exception(f"Failed to start ALS for {project_root}: {e}")
                 raise
 
+    def _key_for_client(self, client: ALSClient) -> ProjectKey | None:
+        """Return the cached project-view key which owns a client."""
+        return next(
+            (key for key, instance in self._instances.items() if instance.client is client),
+            None,
+        )
+
+    async def select_client(self, client: ALSClient) -> None:
+        """Select a validated explicit GPR view for file-based tools."""
+        async with self._pool_lock:
+            project_key = self._key_for_client(client)
+            if project_key is None or project_key[1] is None:
+                raise RuntimeError("explicit ALS project client is not cached")
+            self._selected_projects[project_key[0]] = project_key[1]
+
     async def discard_client(
         self,
         file_path: str | None,
         client: ALSClient,
     ) -> None:
         """Discard a cached client whose evaluated project view is invalid."""
-        project_root = self._project_root(file_path)
         async with self._pool_lock:
-            instance = self._instances.get(project_root)
-            if instance is None or instance.client is not client:
+            project_key = self._key_for_client(client)
+            if project_key is None:
                 return
 
-            logger.info("Discarding invalid ALS project view for %s", project_root)
-            await self._shutdown_instance(project_root)
+            project_root, project_file = project_key
+            if self._selected_projects.get(project_root) == project_file:
+                self._selected_projects.pop(project_root, None)
+            logger.info("Discarding invalid ALS project view for %s", project_key)
+            await self._shutdown_instance(project_key)
 
     async def _evict_if_needed(self) -> None:
         """Evict oldest instance if at capacity."""
@@ -197,28 +232,32 @@ class ALSPool:
             return
 
         # Find the oldest (least recently used) instance
-        oldest_root = None
+        oldest_key = None
         oldest_time = float("inf")
 
-        for root, instance in self._instances.items():
+        for key, instance in self._instances.items():
             if instance.last_used < oldest_time:
                 oldest_time = instance.last_used
-                oldest_root = root
+                oldest_key = key
 
-        if oldest_root:
-            logger.info(f"Evicting ALS instance for {oldest_root} (LRU)")
-            await self._shutdown_instance(oldest_root)
+        if oldest_key:
+            logger.info(f"Evicting ALS instance for {oldest_key} (LRU)")
+            await self._shutdown_instance(oldest_key)
 
-    async def _shutdown_instance(self, project_root: Path) -> None:
+    async def _shutdown_instance(self, project_key: ProjectKey) -> None:
         """Shutdown a specific ALS instance."""
-        if project_root not in self._instances:
+        if project_key not in self._instances:
             return
 
-        instance = self._instances.pop(project_root)
+        instance = self._instances.pop(project_key)
         try:
             await shutdown_als(instance.client, instance.monitor)
         except Exception as e:
-            logger.warning(f"Error shutting down ALS for {project_root}: {e}")
+            logger.warning(
+                "Error shutting down ALS for %s: %s",
+                instance.project_root,
+                e,
+            )
 
     async def _cleanup_loop(self) -> None:
         """Periodically clean up idle instances."""
@@ -232,14 +271,18 @@ class ALSPool:
                     now = time.time()
                     to_remove = []
 
-                    for root, instance in self._instances.items():
+                    for key, instance in self._instances.items():
                         idle_time = now - instance.last_used
                         if idle_time > self.idle_timeout:
-                            logger.info(f"ALS for {root} idle for {idle_time:.0f}s, shutting down")
-                            to_remove.append(root)
+                            logger.info(
+                                "ALS for %s idle for %.0fs, shutting down",
+                                instance.project_root,
+                                idle_time,
+                            )
+                            to_remove.append(key)
 
-                    for root in to_remove:
-                        await self._shutdown_instance(root)
+                    for key in to_remove:
+                        await self._shutdown_instance(key)
 
                     # Stop cleanup loop if no instances left
                     if not self._instances:
@@ -258,8 +301,8 @@ class ALSPool:
             if self._cleanup_task:
                 self._cleanup_task.cancel()
 
-            for root in list(self._instances.keys()):
-                await self._shutdown_instance(root)
+            for key in list(self._instances.keys()):
+                await self._shutdown_instance(key)
 
     def get_stats(self) -> dict[str, Any]:
         """Get pool statistics."""
@@ -271,11 +314,14 @@ class ALSPool:
             "max_instances": self.max_instances,
             "projects": [
                 {
-                    "project": str(root),
+                    "project": str(inst.project_root),
+                    "project_file": (
+                        str(inst.project_file) if inst.project_file is not None else None
+                    ),
                     "idle_seconds": now - inst.last_used,
                     "is_running": inst.client.is_running,
                 }
-                for root, inst in self._instances.items()
+                for inst in self._instances.values()
             ],
         }
 
@@ -284,13 +330,16 @@ class ALSPool:
 _als_pool = ALSPool(max_instances=3, idle_timeout=300.0)
 
 
-async def get_als_client(file_path: str | None = None) -> ALSClient:
+async def get_als_client(
+    file_path: str | None = None,
+    gpr_file: str | Path | None = None,
+) -> ALSClient:
     """
     Get an ALS client for the project containing the given file.
 
     This is a convenience wrapper around the ALS pool.
     """
-    return await _als_pool.get_client(file_path)
+    return await _als_pool.get_client(file_path, gpr_file=gpr_file)
 
 
 async def shutdown_als_client() -> None:
@@ -494,7 +543,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="ada_project_info",
-            description="Get information about an Ada project from its GPR file",
+            description=(
+                "Select an exact GPR project and return its evaluated "
+                "structure; later file tools reuse the validated selection"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -762,9 +814,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # Extract file path from arguments for project detection
     file_path = arguments.get("file") or arguments.get("gpr_file")
+    gpr_file = arguments.get("gpr_file") if name == "ada_project_info" else None
 
     try:
-        client = await get_als_client(file_path=file_path)
+        client = await get_als_client(file_path=file_path, gpr_file=gpr_file)
     except Exception as e:
         error_result = {
             "error": f"Failed to connect to ALS: {e}",
@@ -930,13 +983,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "available_tools": "Use list_tools to see available tools",
                 }
 
-        if name == "ada_project_info" and result.get("reason") == "project-load-failed":
-            # A project may become valid after generated files or imported
-            # projects are prepared. Do not preserve ALS's failed project view
-            # in the pool; the next request must evaluate the current tree.
-            await _als_pool.discard_client(file_path, client)
+        if name == "ada_project_info":
+            if result.get("complete") is True:
+                # File-based tools do not carry a GPR parameter. Publish the
+                # selection only after ALS confirms that it loaded the exact
+                # requested project.
+                await _als_pool.select_client(client)
+            elif result.get("reason") == "project-load-failed":
+                # A project may become valid after generated files or imported
+                # projects are prepared. Do not preserve ALS's failed project
+                # view in the pool; the next request evaluates the current tree.
+                await _als_pool.discard_client(file_path, client)
 
     except Exception as e:
+        if name == "ada_project_info":
+            await _als_pool.discard_client(file_path, client)
         logger.exception(f"Error executing tool {name}: {e}")
         result = {
             "error": str(e),
