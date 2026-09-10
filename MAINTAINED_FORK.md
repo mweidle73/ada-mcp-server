@@ -40,6 +40,7 @@ themselves are maintained in the Abuild repository.
 | `0019` | [`8ef1c77`](https://github.com/mweidle73/ada-mcp-server/commit/8ef1c770a0d746bf4b3faff2b910ec96a57de1c0) | Refresh explicit file diagnostics after a dependency source changes while retaining the navigation document cache. |
 | `0020` | [`1218f45`](https://github.com/mweidle73/ada-mcp-server/commit/1218f455c78b05512f95c7e7dc12ef5468d36c5a) | Select an exact GPR project view and retain it for subsequent file tools. |
 | `0021` | [`ae71c6b`](https://github.com/mweidle73/ada-mcp-server/commit/ae71c6bfa52add85f466ccfa0477f398bb970e15) | Apply the maintained source format to the project-view pool lookup. |
+| `0022` | [`c79361d`](https://github.com/mweidle73/ada-mcp-server/commit/c79361d33db87714253cf0c8e1e0e76fdb3e11a3) | Attach validated GPR search paths and scenario overrides to an exact project view. |
 
 All entries are fork-only relative to the upstream history mirrored by `main`.
 Here, *fork-only* means that the commit is absent from that mirrored history;
