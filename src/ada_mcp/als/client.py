@@ -1,8 +1,10 @@
 """Async client for communicating with Ada Language Server via LSP."""
 
 import asyncio
+import copy
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from ada_mcp.als.types import (
@@ -34,9 +36,31 @@ class ALSClient:
         self._initialized = False
         self._server_capabilities: dict[str, Any] = {}
 
+        # ALS requests configuration through workspace/configuration after
+        # initialization. Keep the settings selected for this client so that
+        # the pull response cannot erase a preceding pushed configuration.
+        self._workspace_configuration: dict[str, Any] = {}
+
         # Diagnostics are pushed via notifications, store them here
         self._diagnostics: dict[str, list[Diagnostic]] = {}
         self._diagnostics_lock = asyncio.Lock()
+        self._diagnostic_generations: dict[str, int] = {}
+        self._diagnostics_changed = asyncio.Condition()
+
+        # ALS reports project indexing through LSP work-done progress. Track
+        # those tokens so workspace-wide queries do not mistake a partial
+        # index for a complete empty result.
+        self._active_indexing_tokens: set[int | str] = set()
+        self._indexing_seen = False
+        self._indexing_generation = 0
+        self._indexing_changed = asyncio.Condition()
+
+        # A source which appears below the project root after ALS starts needs
+        # a watched-files notification before didOpen. Existing sources are
+        # part of the initial project load and must not trigger a reload merely
+        # because an MCP tool opens them for the first time.
+        self._project_root: Path | None = None
+        self._known_project_sources: set[Path] = set()
 
     @property
     def is_running(self) -> bool:
@@ -47,6 +71,62 @@ class ALSClient:
         """Start the background read loop."""
         if self._read_task is None:
             self._read_task = asyncio.create_task(self._read_loop())
+
+    def set_project_source_baseline(self, project_root: Path) -> None:
+        """Record Ada sources which exist before this ALS instance starts."""
+        resolved_root = project_root.resolve()
+        self._project_root = resolved_root
+        self._known_project_sources = {
+            source.resolve()
+            for pattern in ("*.ads", "*.adb")
+            for source in resolved_root.rglob(pattern)
+            if source.is_file()
+        }
+
+    def set_workspace_configuration(self, settings: dict[str, Any]) -> None:
+        """Store the settings returned to ALS configuration requests."""
+        self._workspace_configuration = copy.deepcopy(settings)
+
+    def _workspace_configuration_values(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[Any]:
+        """Resolve LSP configuration sections for this project client."""
+        values: list[Any] = []
+        for item in items:
+            section = item.get("section")
+            value: Any = self._workspace_configuration
+            if section:
+                for component in section.split("."):
+                    if not isinstance(value, dict) or component not in value:
+                        value = None
+                        break
+                    value = value[component]
+            values.append(copy.deepcopy(value))
+        return values
+
+    def is_new_project_source(self, source: Path) -> bool:
+        """Return whether a source appeared below the project root since startup."""
+        if self._project_root is None or source.suffix.lower() not in (".ads", ".adb"):
+            return False
+
+        resolved_source = source.resolve()
+        if not resolved_source.is_relative_to(self._project_root):
+            return False
+
+        return resolved_source not in self._known_project_sources
+
+    def remember_project_source(self, source: Path) -> None:
+        """Include a successfully announced source in this ALS instance's baseline."""
+        self._known_project_sources.add(source.resolve())
+
+    def is_known_project_source(self, source: Path) -> bool:
+        """Return whether a source belongs to this ALS instance's baseline."""
+        return source.resolve() in self._known_project_sources
+
+    def forget_project_source(self, source: Path) -> None:
+        """Remove a deleted source from this ALS instance's baseline."""
+        self._known_project_sources.discard(source.resolve())
 
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send LSP request and wait for response."""
@@ -68,14 +148,17 @@ class ALSClient:
         self._pending_requests[request_id] = future
 
         logger.debug(f"Sending request {request_id}: {method}")
-        await self._write_message(request)
 
         try:
+            await self._write_message(request)
             result = await asyncio.wait_for(future, timeout=30.0)
             return result
         except TimeoutError:
             self._pending_requests.pop(request_id, None)
             raise LSPError(-1, f"Request {method} timed out")
+        except Exception:
+            self._pending_requests.pop(request_id, None)
+            raise
 
     async def send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send LSP notification (no response expected)."""
@@ -124,6 +207,7 @@ class ALSClient:
         """Read responses and notifications from ALS stdout."""
         if self.process.stdout is None:
             logger.error("ALS stdout is not available")
+            self._fail_pending_requests("ALS stdout is not available")
             return
 
         try:
@@ -178,6 +262,17 @@ class ALSClient:
             logger.debug("Read loop cancelled")
         except Exception as e:
             logger.exception(f"Error in read loop: {e}")
+        finally:
+            self._fail_pending_requests("ALS connection closed")
+
+    def _fail_pending_requests(self, message: str) -> None:
+        """Fail requests which cannot receive a response from this ALS."""
+        pending = list(self._pending_requests.values())
+        self._pending_requests.clear()
+
+        for future in pending:
+            if not future.done():
+                future.set_exception(LSPError(-1, message))
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         """Handle incoming LSP message."""
@@ -198,9 +293,11 @@ class ALSClient:
                 # Accept capability registration silently
                 await self._send_response(request_id, result=None)
             elif method == "workspace/configuration":
-                # Return empty config for each requested item
                 items = params.get("items", [])
-                await self._send_response(request_id, result=[{} for _ in items])
+                await self._send_response(
+                    request_id,
+                    result=self._workspace_configuration_values(items),
+                )
             elif method == "window/workDoneProgress/create":
                 # Accept progress token creation
                 await self._send_response(request_id, result=None)
@@ -237,6 +334,8 @@ class ALSClient:
 
             if method == "textDocument/publishDiagnostics":
                 await self._handle_diagnostics(params)
+            elif method == "$/progress":
+                await self._handle_progress(params)
             elif method == "window/logMessage":
                 self._handle_log_message(params)
             elif method == "window/showMessage":
@@ -254,7 +353,119 @@ class ALSClient:
         async with self._diagnostics_lock:
             self._diagnostics[uri] = diagnostics
 
+        async with self._diagnostics_changed:
+            self._diagnostic_generations[uri] = self._diagnostic_generations.get(uri, 0) + 1
+            self._diagnostics_changed.notify_all()
+
         logger.debug(f"Received {len(diagnostics)} diagnostics for {uri}")
+
+    async def _handle_progress(self, params: dict[str, Any]) -> None:
+        """Track ALS project-indexing work-done progress."""
+        token = params.get("token")
+        value = params.get("value", {})
+        kind = value.get("kind")
+
+        if token is None or kind not in ("begin", "end"):
+            return
+
+        async with self._indexing_changed:
+            if kind == "begin" and value.get("title") == "Indexing":
+                self._indexing_seen = True
+                self._active_indexing_tokens.add(token)
+                self._indexing_generation += 1
+                self._indexing_changed.notify_all()
+            elif kind == "end" and token in self._active_indexing_tokens:
+                self._active_indexing_tokens.remove(token)
+                self._indexing_generation += 1
+                self._indexing_changed.notify_all()
+
+    async def diagnostics_generation(self, uri: str) -> int:
+        """Return the number of diagnostic publications seen for a URI."""
+        async with self._diagnostics_changed:
+            return self._diagnostic_generations.get(uri, 0)
+
+    async def wait_for_diagnostics(
+        self,
+        uri: str,
+        after_generation: int,
+        timeout: float = 5.0,
+    ) -> bool:
+        """
+        Wait for a quiescent diagnostic publication after a known generation.
+
+        The pinned ALS does not attach document versions and may publish an
+        intermediate result for the previous text after didChange. Wait until
+        the publication generation remains stable briefly so callers receive
+        the final result for the synchronized text.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        try:
+            while True:
+                async with self._diagnostics_changed:
+                    await asyncio.wait_for(
+                        self._diagnostics_changed.wait_for(
+                            lambda: self._diagnostic_generations.get(uri, 0) > after_generation
+                        ),
+                        timeout=max(0.0, deadline - loop.time()),
+                    )
+                    generation = self._diagnostic_generations[uri]
+
+                await asyncio.sleep(0.1)
+                async with self._diagnostics_changed:
+                    if self._diagnostic_generations.get(uri, 0) == generation:
+                        return True
+
+                if loop.time() >= deadline:
+                    return False
+        except TimeoutError:
+            return False
+
+    async def indexing_generation(self) -> int:
+        """Return the current ALS project-indexing progress generation."""
+        async with self._indexing_changed:
+            return self._indexing_generation
+
+    async def wait_for_indexing(
+        self,
+        timeout: float = 25.0,
+        after_generation: int | None = None,
+    ) -> bool:
+        """Wait until ALS has observed and completed the requested indexing."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        try:
+            while True:
+                async with self._indexing_changed:
+                    await asyncio.wait_for(
+                        self._indexing_changed.wait_for(
+                            lambda: (
+                                self._indexing_seen
+                                and not self._active_indexing_tokens
+                                and (
+                                    after_generation is None
+                                    or self._indexing_generation > after_generation
+                                )
+                            )
+                        ),
+                        timeout=max(0.0, deadline - loop.time()),
+                    )
+                    generation = self._indexing_generation
+
+                # A server may start a second indexing phase immediately after
+                # ending the first. Require a short quiescent interval rather
+                # than exposing that gap as a completed workspace.
+                await asyncio.sleep(0.1)
+                async with self._indexing_changed:
+                    if generation == self._indexing_generation and not self._active_indexing_tokens:
+                        return True
+
+                if loop.time() >= deadline:
+                    return False
+        except TimeoutError:
+            return False
 
     def _handle_log_message(self, params: dict[str, Any]) -> None:
         """Handle window/logMessage notification."""

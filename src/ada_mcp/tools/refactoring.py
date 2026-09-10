@@ -13,8 +13,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ada_mcp.als.client import ALSClient
+
 from ..utils.position import from_lsp_position_dict, to_lsp_position
 from ..utils.uri import file_to_uri, uri_to_file
+from .navigation import _ensure_file_open
 
 # LSP Completion Item Kind mapping
 COMPLETION_ITEM_KIND = {
@@ -46,8 +49,52 @@ COMPLETION_ITEM_KIND = {
 }
 
 
+def _python_index_for_lsp_character(line: str, character: int) -> int | None:
+    """Convert an LSP UTF-16 character offset into a Python string index."""
+    if character < 0:
+        return None
+    if character == 0:
+        return 0
+
+    utf16_units = 0
+    for index, value in enumerate(line):
+        utf16_units += 2 if ord(value) > 0xFFFF else 1
+        if utf16_units == character:
+            return index + 1
+        if utf16_units > character:
+            return None
+
+    return len(line) if utf16_units == character else None
+
+
+def _text_at_lsp_range(file: str, a_range: dict[str, Any]) -> str | None:
+    """Read the exact source text selected by a single-line LSP range."""
+    start = a_range.get("start", {})
+    end = a_range.get("end", {})
+    start_line = start.get("line")
+    end_line = end.get("line")
+    if not isinstance(start_line, int) or start_line != end_line:
+        return None
+
+    try:
+        lines = Path(file).read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+
+    if not 0 <= start_line < len(lines):
+        return None
+
+    line = lines[start_line]
+    start_index = _python_index_for_lsp_character(line, start.get("character", -1))
+    end_index = _python_index_for_lsp_character(line, end.get("character", -1))
+    if start_index is None or end_index is None or end_index < start_index:
+        return None
+
+    return line[start_index:end_index]
+
+
 async def handle_completions(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int,
     column: int,
@@ -69,6 +116,8 @@ async def handle_completions(
     """
     file_uri = file_to_uri(file)
     lsp_pos = to_lsp_position(line, column)
+
+    await _ensure_file_open(als_client, file)
 
     # Build completion context if trigger character provided
     params: dict[str, Any] = {
@@ -133,12 +182,13 @@ def _extract_documentation(doc: Any) -> str:
         return doc
     if isinstance(doc, dict):
         # MarkupContent
-        return doc.get("value", "")
+        value = doc.get("value", "")
+        return value if isinstance(value, str) else str(value)
     return str(doc)
 
 
 async def handle_signature_help(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int,
     column: int,
@@ -156,6 +206,8 @@ async def handle_signature_help(
     """
     file_uri = file_to_uri(file)
     lsp_pos = to_lsp_position(line, column)
+
+    await _ensure_file_open(als_client, file)
 
     result = await als_client.send_request(
         "textDocument/signatureHelp",
@@ -201,13 +253,13 @@ async def handle_signature_help(
 
 
 async def handle_code_actions(
-    als_client,
+    als_client: ALSClient,
     file: str,
     start_line: int,
     start_column: int,
     end_line: int | None = None,
     end_column: int | None = None,
-    diagnostics: list[dict] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Handle ada_code_actions tool request.
 
@@ -225,6 +277,8 @@ async def handle_code_actions(
     """
     file_uri = file_to_uri(file)
 
+    await _ensure_file_open(als_client, file)
+
     # Build range
     start_pos = to_lsp_position(start_line, start_column)
     end_pos = to_lsp_position(
@@ -240,7 +294,6 @@ async def handle_code_actions(
         },
         "context": {
             "diagnostics": diagnostics or [],
-            "only": None,  # Request all kinds of code actions
         },
     }
 
@@ -308,7 +361,7 @@ def _is_valid_ada_identifier(name: str) -> bool:
 
 
 async def handle_rename_symbol(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int,
     column: int,
@@ -340,6 +393,8 @@ async def handle_rename_symbol(
     file_uri = file_to_uri(file)
     lsp_pos = to_lsp_position(line, column)
 
+    await _ensure_file_open(als_client, file)
+
     # First, check if rename is valid using prepareRename
     prepare_result = await als_client.send_request(
         "textDocument/prepareRename",
@@ -363,8 +418,15 @@ async def handle_rename_symbol(
         if "placeholder" in prepare_result:
             old_name = prepare_result["placeholder"]
         elif "start" in prepare_result:
-            # It's a Range, we need to extract the text
-            old_name = prepare_result.get("placeholder", "")
+            old_name = _text_at_lsp_range(file, prepare_result) or ""
+
+    if not old_name:
+        return {
+            "success": False,
+            "error": "Ada Language Server returned an unreadable prepareRename range",
+            "changes": [],
+            "total_changes": 0,
+        }
 
     # Perform the rename
     result = await als_client.send_request(
@@ -393,12 +455,13 @@ async def handle_rename_symbol(
             file_path = uri_to_file(uri)
             for edit in edits:
                 line_num, col_num = from_lsp_position_dict(edit["range"]["start"])
+                old_text = _text_at_lsp_range(file_path, edit["range"]) or old_name
                 changes.append(
                     {
                         "file": file_path,
                         "line": line_num,
                         "column": col_num,
-                        "old_text": old_name,
+                        "old_text": old_text,
                         "new_text": new_name,
                     }
                 )
@@ -410,12 +473,13 @@ async def handle_rename_symbol(
                 file_path = uri_to_file(uri)
                 for edit in doc_change.get("edits", []):
                     line_num, col_num = from_lsp_position_dict(edit["range"]["start"])
+                    old_text = _text_at_lsp_range(file_path, edit["range"]) or old_name
                     changes.append(
                         {
                             "file": file_path,
                             "line": line_num,
                             "column": col_num,
-                            "old_text": old_name,
+                            "old_text": old_text,
                             "new_text": new_name,
                         }
                     )
@@ -435,7 +499,7 @@ async def handle_rename_symbol(
 
 
 async def handle_format_file(
-    als_client,
+    als_client: ALSClient,
     file: str,
     tab_size: int = 3,
     insert_spaces: bool = True,
@@ -452,6 +516,8 @@ async def handle_format_file(
         Dictionary with formatting result
     """
     file_uri = file_to_uri(file)
+
+    await _ensure_file_open(als_client, file)
 
     result = await als_client.send_request(
         "textDocument/formatting",
@@ -496,7 +562,7 @@ async def handle_format_file(
 
 
 async def handle_get_spec(
-    als_client,
+    als_client: ALSClient,
     file: str,
     line: int | None = None,
     column: int | None = None,
@@ -520,6 +586,8 @@ async def handle_get_spec(
     if line is not None and column is not None:
         file_uri = file_to_uri(file)
         lsp_pos = to_lsp_position(line, column)
+
+        await _ensure_file_open(als_client, file)
 
         # Use textDocument/declaration to find spec
         result = await als_client.send_request(
@@ -557,12 +625,12 @@ async def handle_get_spec(
 
     # Fallback: Find corresponding .ads file
     if file_path.suffix.lower() == ".adb":
-        spec_file = file_path.with_suffix(".ads")
-        if spec_file.exists():
+        spec_file_path = file_path.with_suffix(".ads")
+        if spec_file_path.exists():
             # Read first non-comment line for preview
             preview = ""
             try:
-                with open(spec_file) as f:
+                with open(spec_file_path) as f:
                     for spec_line in f:
                         stripped = spec_line.strip()
                         if stripped and not stripped.startswith("--"):
@@ -573,7 +641,7 @@ async def handle_get_spec(
 
             return {
                 "found": True,
-                "spec_file": str(spec_file),
+                "spec_file": str(spec_file_path),
                 "line": 1,
                 "column": 1,
                 "preview": preview,

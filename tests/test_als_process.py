@@ -1,12 +1,205 @@
 """Tests for ALS process management and health monitoring."""
 
 import asyncio
+import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ada_mcp.als.process import ALSHealthMonitor
+from ada_mcp.als.process import (
+    ALSHealthMonitor,
+    ALSProjectContext,
+    get_project_scenario_variables,
+    resolve_project_context,
+    start_als,
+)
+
+
+async def start_mock_als(tmp_path, *, caplog=None):
+    """Start ALS with a mocked transport and return its client."""
+    gpr_file = tmp_path / "sample.gpr"
+    gpr_file.write_text("project Sample is end Sample;\n")
+    process = MagicMock()
+    client = MagicMock()
+    client.send_request = AsyncMock(return_value={"capabilities": {}})
+    client.send_notification = AsyncMock()
+
+    with (
+        patch(
+            "ada_mcp.als.process.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ),
+        patch("ada_mcp.als.process.ALSClient", return_value=client),
+        patch(
+            "ada_mcp.als.process.asyncio.sleep",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await start_als(
+            tmp_path,
+            als_path="/test/ada_language_server",
+            gpr_file=gpr_file,
+        )
+
+    if caplog is not None:
+        assert "BUILD_MODE" in caplog.text
+        assert "analysis" not in caplog.text
+
+    assert result is client
+    client.set_project_source_baseline.assert_called_once_with(tmp_path)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_start_als_configures_project_through_lsp(tmp_path):
+    """Test that current ALS receives the project through LSP settings."""
+    client = await start_mock_als(tmp_path)
+
+    client.send_notification.assert_any_await(
+        "workspace/didChangeConfiguration",
+        {"settings": {"ada": {"projectFile": "sample.gpr"}}},
+    )
+    client.set_workspace_configuration.assert_called_once_with(
+        {"ada": {"projectFile": "sample.gpr"}}
+    )
+    initialize_params = client.send_request.await_args_list[0].args[1]
+    assert initialize_params["capabilities"]["workspace"]["didChangeWatchedFiles"] == {
+        "dynamicRegistration": True,
+    }
+    assert "scenarioVariables" not in initialize_params["initializationOptions"]
+
+
+@pytest.mark.asyncio
+async def test_start_als_configures_scenario_variables(tmp_path, monkeypatch, caplog):
+    """Test that ALS receives explicitly configured scenario variables."""
+    caplog.set_level("INFO")
+    monkeypatch.setenv(
+        "ADA_PROJECT_SCENARIO_VARIABLES",
+        '{"BUILD_MODE":"analysis"}',
+    )
+    client = await start_mock_als(tmp_path, caplog=caplog)
+
+    client.send_notification.assert_any_await(
+        "workspace/didChangeConfiguration",
+        {
+            "settings": {
+                "ada": {
+                    "projectFile": "sample.gpr",
+                    "scenarioVariables": {"BUILD_MODE": "analysis"},
+                }
+            }
+        },
+    )
+    client.set_workspace_configuration.assert_called_once_with(
+        {
+            "ada": {
+                "projectFile": "sample.gpr",
+                "scenarioVariables": {"BUILD_MODE": "analysis"},
+            }
+        }
+    )
+    initialize_params = client.send_request.await_args_list[0].args[1]
+    assert initialize_params["capabilities"]["workspace"]["didChangeWatchedFiles"] == {
+        "dynamicRegistration": True,
+    }
+    assert initialize_params["initializationOptions"]["scenarioVariables"] == {
+        "BUILD_MODE": "analysis",
+    }
+
+
+@pytest.mark.parametrize("value", [None, "", "  \t"])
+def test_project_scenario_variables_default_to_empty(monkeypatch, value):
+    """An unset or empty payload preserves default ALS configuration."""
+    if value is None:
+        monkeypatch.delenv("ADA_PROJECT_SCENARIO_VARIABLES", raising=False)
+    else:
+        monkeypatch.setenv("ADA_PROJECT_SCENARIO_VARIABLES", value)
+
+    assert get_project_scenario_variables() == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not-json", "[]", '{"BUILD_MODE":1}'],
+)
+def test_project_scenario_variables_reject_invalid_values(monkeypatch, value):
+    """Scenario variables must match the ALS string map contract."""
+    monkeypatch.setenv("ADA_PROJECT_SCENARIO_VARIABLES", value)
+
+    with pytest.raises(ValueError, match="must be a JSON object of string values"):
+        get_project_scenario_variables()
+
+
+def test_project_context_merges_defaults_and_normalizes_paths(tmp_path, monkeypatch):
+    """A project view freezes ordered paths and effective scenario values."""
+    first_path = tmp_path / "first"
+    second_path = tmp_path / "second"
+    first_path.mkdir()
+    second_path.mkdir()
+    monkeypatch.setenv(
+        "ADA_PROJECT_SCENARIO_VARIABLES",
+        '{"BUILD_MODE":"analysis","OS":"bsd"}',
+    )
+
+    context = resolve_project_context(
+        project_paths=[str(first_path), str(second_path), str(first_path)],
+        scenario_variables={"OS": "linux", "TARGET_ARCH": "x86_64"},
+    )
+
+    assert context.project_paths == (first_path.resolve(), second_path.resolve())
+    assert context.scenario_map() == {
+        "BUILD_MODE": "analysis",
+        "OS": "linux",
+        "TARGET_ARCH": "x86_64",
+    }
+
+
+@pytest.mark.parametrize("project_path", ["relative", "/missing/project/path"])
+def test_project_context_rejects_unusable_paths(project_path):
+    """A GPR search path must identify an existing absolute directory."""
+    with pytest.raises(ValueError, match="GPR project search path"):
+        resolve_project_context(project_paths=[project_path])
+
+
+@pytest.mark.asyncio
+async def test_start_als_replaces_gpr_project_path(tmp_path, monkeypatch):
+    """The selected view gets its exact GPR search path in the ALS process."""
+    gpr_file = tmp_path / "sample.gpr"
+    gpr_file.write_text("project Sample is end Sample;\n")
+    dependency_path = tmp_path / "dependency"
+    dependency_path.mkdir()
+    monkeypatch.setenv("GPR_PROJECT_PATH", "/wrong/worktree")
+    process = MagicMock()
+    client = MagicMock()
+    client.send_request = AsyncMock(return_value={"capabilities": {}})
+    client.send_notification = AsyncMock()
+    spawn = AsyncMock(return_value=process)
+    context = resolve_project_context(
+        project_paths=[str(dependency_path)],
+        scenario_variables={"OS": "linux"},
+    )
+
+    with (
+        patch(
+            "ada_mcp.als.process.asyncio.create_subprocess_exec",
+            new=spawn,
+        ),
+        patch("ada_mcp.als.process.ALSClient", return_value=client),
+        patch("ada_mcp.als.process.asyncio.sleep", new=AsyncMock()),
+    ):
+        await start_als(
+            tmp_path,
+            als_path="/test/ada_language_server",
+            gpr_file=gpr_file,
+            project_context=context,
+        )
+
+    child_environment = spawn.await_args.kwargs["env"]
+    assert child_environment["GPR_PROJECT_PATH"] == str(dependency_path)
+    assert os.environ["GPR_PROJECT_PATH"] == "/wrong/worktree"
+    initialize_params = client.send_request.await_args_list[0].args[1]
+    assert initialize_params["initializationOptions"]["scenarioVariables"] == {"OS": "linux"}
 
 
 class TestALSHealthMonitor:
@@ -69,6 +262,35 @@ class TestALSHealthMonitor:
         # Clean up
         monitor.stop_monitoring()
         await asyncio.sleep(0.1)
+
+    @pytest.mark.asyncio
+    async def test_restart_retains_project_context(self, monitor, mock_client):
+        """An automatic ALS restart must retain the selected GPR environment."""
+        context = ALSProjectContext(
+            project_paths=(Path("/test/dependency"),),
+            scenario_variables=(("OS", "linux"),),
+        )
+        monitor.project_context = context
+        mock_client.is_running = False
+        replacement = MagicMock()
+        replacement.is_running = False
+
+        with (
+            patch(
+                "ada_mcp.als.process.start_als",
+                new_callable=AsyncMock,
+                return_value=replacement,
+            ) as restart,
+            patch("ada_mcp.als.process.asyncio.sleep", new=AsyncMock()),
+        ):
+            await monitor._handle_crash()
+
+        restart.assert_awaited_once_with(
+            monitor.project_root,
+            als_path=monitor.als_path,
+            gpr_file=monitor.gpr_file,
+            project_context=context,
+        )
 
     @pytest.mark.asyncio
     async def test_exponential_backoff_calculation(self, monitor):

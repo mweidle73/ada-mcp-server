@@ -1,8 +1,11 @@
 """Navigation tools: goto definition, find references, hover."""
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from ada_mcp.als.client import ALSClient, LSPError
 from ada_mcp.utils.uri import file_to_uri, uri_to_file
@@ -211,7 +214,14 @@ async def handle_type_definition(
         }
 
     if not result:
-        return {"found": False}
+        return {
+            "found": False,
+            "hint": (
+                "Place the cursor on an object or parameter identifier. "
+                "Use ada_goto_definition when the cursor is already on an "
+                "explicit type name."
+            ),
+        }
 
     # Handle both single location and array of locations
     if isinstance(result, list):
@@ -396,21 +406,180 @@ async def handle_hover(
     }
 
 
-# Cache of open files to avoid reopening
-_open_files: set[str] = set()
+@dataclass
+class _OpenFile:
+    """Text and LSP version last synchronized with one ALS client."""
+
+    text: str
+    version: int
 
 
-async def _ensure_file_open(client: ALSClient, file_path: str) -> None:
-    """Ensure a file is open in ALS."""
+# Track open files per ALS client. A restarted server receives a new client and
+# must therefore see fresh didOpen notifications for every source it analyzes.
+_open_files: WeakKeyDictionary[ALSClient, dict[str, _OpenFile]] = WeakKeyDictionary()
+_open_file_locks: WeakKeyDictionary[ALSClient, asyncio.Lock] = WeakKeyDictionary()
+
+
+def _open_file_paths(client: ALSClient) -> list[str]:
+    """Return the source paths synchronized with one ALS client."""
+    return sorted(uri_to_file(uri) for uri in _open_files.get(client, {}))
+
+
+async def _prune_deleted_open_files(client: ALSClient) -> None:
+    """Close and announce open sources which disappeared from the filesystem."""
+    for file_path in _open_file_paths(client):
+        if not Path(file_path).exists():
+            await _ensure_file_open(client, file_path)
+
+
+async def _ensure_file_open(
+    client: ALSClient,
+    file_path: str,
+    force_change: bool = False,
+) -> bool | None:
+    """
+    Synchronize a file with ALS.
+
+    Returns True when didOpen or didChange was sent, False when the server
+    already has the current text and None when the path does not exist.
+    """
+    # MCP dispatches tool calls concurrently. Keep the LSP document lifecycle
+    # atomic per ALS client without serializing the semantic requests which
+    # follow this short synchronization step.
+    client_lock = _open_file_locks.setdefault(client, asyncio.Lock())
+    async with client_lock:
+        return await _synchronize_file(client, file_path, force_change)
+
+
+async def _synchronize_file(
+    client: ALSClient,
+    file_path: str,
+    force_change: bool,
+) -> bool | None:
+    """Synchronize one file while holding its ALS client's document lock."""
     file_uri = file_to_uri(file_path)
-
-    if file_uri in _open_files:
-        return
+    client_open_files = _open_files.setdefault(client, {})
 
     path = Path(file_path)
     if not path.exists():
+        open_file = client_open_files.pop(file_uri, None)
+        is_known_source = client.is_known_project_source(path)
+        if open_file is not None:
+            await client.send_notification(
+                "textDocument/didClose",
+                {
+                    "textDocument": {
+                        "uri": file_uri,
+                    }
+                },
+            )
+
+        if open_file is not None or is_known_source:
+            indexing_generation = await client.indexing_generation()
+            await client.send_notification(
+                "workspace/didDeleteFiles",
+                {
+                    "files": [
+                        {
+                            "uri": file_uri,
+                        }
+                    ]
+                },
+            )
+            await client.send_notification(
+                "workspace/didChangeWatchedFiles",
+                {
+                    "changes": [
+                        {
+                            "uri": file_uri,
+                            "type": 3,
+                        }
+                    ]
+                },
+            )
+            # The file-operation notification schedules a project reload, but
+            # its indexing progress is not a processing barrier for the
+            # watched-file notification queued behind it. ALS's reload command
+            # is a fence job and therefore makes both notifications visible
+            # before the final index generation is accepted.
+            await client.send_request(
+                "workspace/executeCommand",
+                {
+                    "command": "als-reload-project",
+                    "arguments": [],
+                },
+            )
+            client.forget_project_source(path)
+            if not await client.wait_for_indexing(
+                after_generation=indexing_generation,
+            ):
+                raise LSPError(
+                    -1,
+                    f"Ada Language Server did not finish removing project source: {file_path}",
+                )
+
         logger.warning(f"File not found: {file_path}")
-        return
+        return None
+
+    text = path.read_text()
+    open_file = client_open_files.get(file_uri)
+    if open_file is not None:
+        if open_file.text == text and not force_change:
+            return False
+
+        version = open_file.version + 1
+        await client.send_notification(
+            "textDocument/didChange",
+            {
+                "textDocument": {
+                    "uri": file_uri,
+                    "version": version,
+                },
+                # A change without a range replaces the complete document and
+                # is valid for ALS's incremental synchronization capability.
+                "contentChanges": [{"text": text}],
+            },
+        )
+        client_open_files[file_uri] = _OpenFile(text=text, version=version)
+        logger.debug(f"Updated file in ALS: {file_path}")
+        return True
+
+    project_source_created = client.is_new_project_source(path)
+    if project_source_created:
+        indexing_generation = await client.indexing_generation()
+        # ALS explicitly reloads its Libadalang contexts for file-operation
+        # notifications. A watched-file event alone only updates the current
+        # context incrementally and leaves cross-unit name resolution stale.
+        await client.send_notification(
+            "workspace/didCreateFiles",
+            {
+                "files": [
+                    {
+                        "uri": file_uri,
+                    }
+                ]
+            },
+        )
+        await client.send_notification(
+            "workspace/didChangeWatchedFiles",
+            {
+                "changes": [
+                    {
+                        "uri": file_uri,
+                        "type": 1,
+                    }
+                ]
+            },
+        )
+        await client.send_request(
+            "workspace/executeCommand",
+            {
+                "command": "als-reload-project",
+                "arguments": [],
+            },
+        )
+        client.remember_project_source(path)
+        logger.debug(f"Announced new project source to ALS: {file_path}")
 
     # Determine language ID
     suffix = path.suffix.lower()
@@ -421,22 +590,30 @@ async def _ensure_file_open(client: ALSClient, file_path: str) -> None:
     else:
         language_id = "ada"  # Default
 
-    try:
-        await client.send_notification(
-            "textDocument/didOpen",
-            {
-                "textDocument": {
-                    "uri": file_uri,
-                    "languageId": language_id,
-                    "version": 1,
-                    "text": path.read_text(),
-                }
-            },
-        )
-        _open_files.add(file_uri)
-        logger.debug(f"Opened file in ALS: {file_path}")
-    except Exception as e:
-        logger.warning(f"Failed to open file in ALS: {e}")
+    await client.send_notification(
+        "textDocument/didOpen",
+        {
+            "textDocument": {
+                "uri": file_uri,
+                "languageId": language_id,
+                "version": 1,
+                "text": text,
+            }
+        },
+    )
+    client_open_files[file_uri] = _OpenFile(text=text, version=1)
+    logger.debug(f"Opened file in ALS: {file_path}")
+
+    if project_source_created:
+        if not await client.wait_for_indexing(
+            after_generation=indexing_generation,
+        ):
+            raise LSPError(
+                -1,
+                f"Ada Language Server did not finish loading project source: {file_path}",
+            )
+
+    return True
 
 
 async def _get_line_preview(file_path: str, line_0based: int) -> str:
@@ -457,3 +634,4 @@ async def _get_line_preview(file_path: str, line_0based: int) -> str:
 def clear_open_files_cache() -> None:
     """Clear the open files cache (useful for testing)."""
     _open_files.clear()
+    _open_file_locks.clear()

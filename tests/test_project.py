@@ -1,14 +1,15 @@
 """Unit tests for Phase 3: Project Intelligence tools."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call
 
+import pytest
+
+from ada_mcp.als.client import LSPError
 from ada_mcp.tools.project import (
-    parse_gpr_file,
-    handle_project_info,
     handle_call_hierarchy,
-    handle_dependency_graph
+    handle_dependency_graph,
+    handle_project_info,
 )
 
 
@@ -37,89 +38,151 @@ def mock_als_client():
 
 
 # ============================================================================
-# GPR File Parser Tests (Task 3.1)
-# ============================================================================
-
-class TestGPRParser:
-    """Tests for GPR file parsing."""
-    
-    def test_parse_gpr_basic(self, sample_gpr_path):
-        """Test basic GPR file parsing."""
-        result = parse_gpr_file(sample_gpr_path)
-        
-        assert result["project_name"] == "Sample"
-        assert "src" in result["source_dirs"]
-        assert result["object_dir"] == "obj"
-        assert result["exec_dir"] == "bin"
-        assert "main.adb" in result["main_units"]
-    
-    def test_parse_gpr_nonexistent(self):
-        """Test parsing non-existent GPR file."""
-        result = parse_gpr_file("/nonexistent/project.gpr")
-        
-        assert result["project_name"] is None
-        assert result["source_dirs"] == []
-        assert result["object_dir"] is None
-        assert result["main_units"] == []
-    
-    def test_parse_gpr_multiple_sources(self, tmp_path):
-        """Test parsing GPR with multiple source directories."""
-        gpr_file = tmp_path / "multi.gpr"
-        gpr_file.write_text("""
-project Multi is
-   for Source_Dirs use ("src", "tests", "lib");
-   for Object_Dir use "build";
-   for Main use ("app.adb", "test.adb");
-end Multi;
-""")
-        
-        result = parse_gpr_file(gpr_file)
-        
-        assert result["project_name"] == "Multi"
-        assert len(result["source_dirs"]) == 3
-        assert "src" in result["source_dirs"]
-        assert "tests" in result["source_dirs"]
-        assert "lib" in result["source_dirs"]
-        assert len(result["main_units"]) == 2
-
-
-# ============================================================================
 # ada_project_info Tests (Task 3.2)
 # ============================================================================
 
 class TestProjectInfo:
     """Tests for ada_project_info tool."""
-    
+
     @pytest.mark.asyncio
-    async def test_project_info_basic(self, sample_gpr_path):
-        """Test basic project info retrieval."""
-        result = await handle_project_info(str(sample_gpr_path))
-        
-        assert "project_file" in result
-        assert "project_name" in result
+    async def test_project_info_uses_evaluated_als_view(
+        self,
+        sample_gpr_path,
+        mock_als_client,
+    ):
+        """Test project information from ALS's evaluated GPR view."""
+        project_root = sample_gpr_path.parent.resolve()
+        root_project = {
+            "id": "sample",
+            "name": "Sample",
+            "file-name": str(sample_gpr_path.resolve()),
+            "source-directories": [
+                str(project_root / "src"),
+                str(project_root / "generated"),
+            ],
+            "object-directory": str(project_root / "obj/debug"),
+            "executable-directory": str(project_root / "bin/debug"),
+        }
+        mock_als_client.send_request.side_effect = [
+            {
+                "tree": {"root-project": {"id": "sample"}},
+                "projects": [{"project": root_project}],
+            },
+            [
+                str(project_root / "src/main.adb"),
+                str(project_root / "tests/tester.adb"),
+            ],
+        ]
+
+        result = await handle_project_info(
+            mock_als_client,
+            str(sample_gpr_path),
+        )
+
+        assert result["project_file"] == str(sample_gpr_path.resolve())
         assert result["project_name"] == "Sample"
-        assert len(result["source_dirs"]) > 0
+        assert result["source_dirs"] == root_project["source-directories"]
         assert all(Path(d).is_absolute() for d in result["source_dirs"])
-        assert "main.adb" in result["main_units"]
-    
+        assert result["object_dir"] == str(project_root / "obj/debug")
+        assert result["exec_dir"] == str(project_root / "bin/debug")
+        assert result["main_units"] == ["main.adb", "tester.adb"]
+        assert result["complete"] is True
+        assert mock_als_client.send_request.await_args_list == [
+            call(
+                "workspace/executeCommand",
+                {
+                    "command": "als-project-view-information",
+                    "arguments": [],
+                },
+            ),
+            call(
+                "workspace/executeCommand",
+                {"command": "als-mains", "arguments": []},
+            ),
+        ]
+
     @pytest.mark.asyncio
-    async def test_project_info_absolute_paths(self, sample_gpr_path):
-        """Test that returned paths are absolute."""
-        result = await handle_project_info(str(sample_gpr_path))
-        
-        assert Path(result["project_file"]).is_absolute()
-        for src_dir in result["source_dirs"]:
-            assert Path(src_dir).is_absolute()
-        if result["object_dir"]:
-            assert Path(result["object_dir"]).is_absolute()
-    
+    async def test_project_info_rejects_wrong_loaded_project(
+        self,
+        sample_gpr_path,
+        mock_als_client,
+    ):
+        """Test that stale or ignored ALS project configuration fails loudly."""
+        mock_als_client.send_request.return_value = {
+            "tree": {"root-project": {"id": "other"}},
+            "projects": [
+                {
+                    "project": {
+                        "id": "other",
+                        "file-name": "/tmp/other.gpr",
+                    }
+                }
+            ],
+        }
+
+        with pytest.raises(RuntimeError, match="loaded a different project"):
+            await handle_project_info(
+                mock_als_client,
+                str(sample_gpr_path),
+            )
+
     @pytest.mark.asyncio
-    async def test_project_info_nonexistent(self):
+    async def test_project_info_nonexistent(self, mock_als_client):
         """Test project info for non-existent file."""
-        result = await handle_project_info("/nonexistent/project.gpr")
-        
-        assert result["project_name"] is None
-        assert result["source_dirs"] == []
+        with pytest.raises(FileNotFoundError):
+            await handle_project_info(
+                mock_als_client,
+                "/nonexistent/project.gpr",
+            )
+        mock_als_client.send_request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_project_info_calibrates_als_project_load_failure(
+        self,
+        sample_gpr_path,
+        mock_als_client,
+    ):
+        """An ALS project-view failure must not expose its internal backtrace."""
+        mock_als_client.send_request.side_effect = LSPError(
+            -32603,
+            "Exception: raised CONSTRAINT_ERROR\n/internal/als/backtrace",
+        )
+
+        result = await handle_project_info(
+            mock_als_client,
+            str(sample_gpr_path),
+        )
+
+        assert result == {
+            "project_file": str(sample_gpr_path.resolve()),
+            "complete": False,
+            "error": (
+                "Ada Language Server could not evaluate the requested GPR "
+                "project. Ensure that imported GPR projects, generated project "
+                "files and required build dependencies are available."
+            ),
+            "reason": "project-load-failed",
+            "lsp_code": -32603,
+        }
+        assert "backtrace" not in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_project_info_preserves_transport_failure(
+        self,
+        sample_gpr_path,
+        mock_als_client,
+    ):
+        """A transport failure is not misreported as a broken GPR closure."""
+        mock_als_client.send_request.side_effect = LSPError(
+            -1,
+            "ALS connection closed",
+        )
+
+        with pytest.raises(LSPError, match="ALS connection closed"):
+            await handle_project_info(
+                mock_als_client,
+                str(sample_gpr_path),
+            )
 
 
 # ============================================================================

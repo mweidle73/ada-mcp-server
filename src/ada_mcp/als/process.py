@@ -1,15 +1,29 @@
 """ALS process management - spawning, initialization, and lifecycle."""
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ada_mcp.als.client import ALSClient
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ALSProjectContext:
+    """Immutable environment which identifies one evaluated GPR view."""
+
+    project_paths: tuple[Path, ...] | None = None
+    scenario_variables: tuple[tuple[str, str], ...] = ()
+
+    def scenario_map(self) -> dict[str, str]:
+        """Return the scenario variables in the mapping form expected by ALS."""
+        return dict(self.scenario_variables)
 
 
 @dataclass
@@ -25,6 +39,7 @@ class ALSHealthMonitor:
     project_root: Path
     als_path: str
     gpr_file: Path | None = None
+    project_context: ALSProjectContext | None = None
 
     # Restart configuration
     max_restart_attempts: int = 5
@@ -35,7 +50,7 @@ class ALSHealthMonitor:
     # State tracking
     restart_count: int = field(default=0, init=False)
     last_restart_time: float = field(default=0.0, init=False)
-    _monitor_task: asyncio.Task | None = field(default=None, init=False)
+    _monitor_task: asyncio.Task[None] | None = field(default=None, init=False)
     _shutdown_requested: bool = field(default=False, init=False)
     _on_restart_callback: Callable[["ALSClient"], None] | None = field(default=None, init=False)
 
@@ -108,6 +123,7 @@ class ALSHealthMonitor:
                 self.project_root,
                 als_path=self.als_path,
                 gpr_file=self.gpr_file,
+                project_context=self.project_context,
             )
 
             # Update reference
@@ -249,10 +265,75 @@ async def find_gpr_file(project_root: Path) -> Path | None:
     return gpr_files[0]
 
 
+def get_project_scenario_variables() -> dict[str, str]:
+    """Read validated ALS scenario variables from the environment."""
+    raw_variables = os.environ.get("ADA_PROJECT_SCENARIO_VARIABLES")
+    if raw_variables is None or not raw_variables.strip():
+        return {}
+
+    try:
+        variables = json.loads(raw_variables)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "ADA_PROJECT_SCENARIO_VARIABLES must be a JSON object of string values"
+        ) from error
+
+    if not isinstance(variables, dict) or any(
+        not isinstance(value, str) for value in variables.values()
+    ):
+        raise ValueError("ADA_PROJECT_SCENARIO_VARIABLES must be a JSON object of string values")
+
+    return variables
+
+
+def resolve_project_context(
+    project_paths: list[str] | None = None,
+    scenario_variables: dict[str, str] | None = None,
+) -> ALSProjectContext:
+    """Validate and freeze the effective environment for one GPR view."""
+    resolved_paths: tuple[Path, ...] | None = None
+    if project_paths is not None:
+        if not isinstance(project_paths, list) or any(
+            not isinstance(path, str) for path in project_paths
+        ):
+            raise ValueError("GPR project search paths must be a string array")
+        normalized_paths: list[Path] = []
+        for raw_path in project_paths:
+            path = Path(raw_path)
+            if not path.is_absolute():
+                raise ValueError("GPR project search paths must be absolute")
+
+            resolved_path = path.resolve()
+            if not resolved_path.is_dir():
+                raise ValueError(f"GPR project search path is not a directory: {resolved_path}")
+            if os.pathsep in str(resolved_path):
+                raise ValueError(
+                    f"GPR project search path contains {os.pathsep!r}: {resolved_path}"
+                )
+            if resolved_path not in normalized_paths:
+                normalized_paths.append(resolved_path)
+        resolved_paths = tuple(normalized_paths)
+
+    effective_variables = get_project_scenario_variables()
+    if scenario_variables is not None:
+        if not isinstance(scenario_variables, dict) or any(
+            not isinstance(name, str) or not isinstance(value, str)
+            for name, value in scenario_variables.items()
+        ):
+            raise ValueError("GPR scenario variables must be a string map")
+        effective_variables.update(scenario_variables)
+
+    return ALSProjectContext(
+        project_paths=resolved_paths,
+        scenario_variables=tuple(sorted(effective_variables.items())),
+    )
+
+
 async def start_als(
     project_root: Path,
     als_path: str | None = None,
     gpr_file: Path | None = None,
+    project_context: ALSProjectContext | None = None,
 ) -> ALSClient:
     """
     Spawn ALS process and initialize LSP session.
@@ -261,6 +342,7 @@ async def start_als(
         project_root: Root directory of the Ada project
         als_path: Path to ALS executable (defaults to 'ada_language_server')
         gpr_file: Path to GPR file (auto-detected if None)
+        project_context: Validated GPR search path and scenario variables
 
     Returns:
         Initialized ALSClient ready for requests
@@ -280,13 +362,51 @@ async def start_als(
         else:
             gpr_file = await find_gpr_file(project_root)
 
+    effective_context = project_context or resolve_project_context()
+    scenario_variables = effective_context.scenario_map()
+
+    # Current ALS releases can pull settings through workspace/configuration
+    # while initialization is still in progress. Prepare the same settings
+    # that are pushed after initialization before starting the read loop.
+    ada_settings: dict[str, str | bool | dict[str, str]] = {}
+    if gpr_file and gpr_file.exists():
+        resolved_root = project_root.resolve()
+        resolved_gpr = gpr_file.resolve()
+        try:
+            project_file = str(resolved_gpr.relative_to(resolved_root))
+        except ValueError:
+            project_file = str(resolved_gpr)
+        ada_settings["projectFile"] = project_file
+        if scenario_variables:
+            ada_settings["scenarioVariables"] = scenario_variables
+    else:
+        ada_settings["enableIndexing"] = False
+
     logger.info(f"Starting ALS: {resolved_als_path}")
     logger.info(f"Project root: {project_root}")
     if gpr_file:
         logger.info(f"GPR file: {gpr_file}")
+    if scenario_variables:
+        logger.info(
+            "GPR scenario variable names: %s",
+            ", ".join(sorted(scenario_variables)),
+        )
+    if effective_context.project_paths is not None:
+        logger.info(
+            "GPR project search paths: %s",
+            os.pathsep.join(str(path) for path in effective_context.project_paths),
+        )
 
     # Get Alire environment if this is an Alire project
     alire_env = await get_alire_environment(project_root)
+    if effective_context.project_paths is not None:
+        alire_env = dict(os.environ) if alire_env is None else dict(alire_env)
+        if effective_context.project_paths:
+            alire_env["GPR_PROJECT_PATH"] = os.pathsep.join(
+                str(path) for path in effective_context.project_paths
+            )
+        else:
+            alire_env.pop("GPR_PROJECT_PATH", None)
 
     # Spawn ALS process with Alire environment if available
     process = await asyncio.create_subprocess_exec(
@@ -299,6 +419,7 @@ async def start_als(
     )
 
     client = ALSClient(process=process)
+    client.set_workspace_configuration({"ada": ada_settings})
 
     # Start reading responses in background
     client.start_reading()
@@ -306,7 +427,7 @@ async def start_als(
     # Send initialize request
     root_uri = project_root.as_uri()
 
-    init_params = {
+    init_params: dict[str, Any] = {
         "processId": os.getpid(),
         "capabilities": {
             "textDocument": {
@@ -345,6 +466,9 @@ async def start_als(
             },
             "workspace": {
                 "workspaceFolders": True,
+                "didChangeWatchedFiles": {
+                    "dynamicRegistration": True,
+                },
                 "symbol": {
                     "dynamicRegistration": True,
                 },
@@ -362,6 +486,8 @@ async def start_als(
     # like Python venvs or node_modules)
     if gpr_file and gpr_file.exists():
         init_params["initializationOptions"]["projectFile"] = str(gpr_file)
+        if scenario_variables:
+            init_params["initializationOptions"]["scenarioVariables"] = scenario_variables
     else:
         logger.warning(
             "No GPR project file found. Disabling ALS indexing to prevent "
@@ -383,6 +509,14 @@ async def start_als(
     # Send initialized notification
     await client.send_notification("initialized", {})
 
+    # Current ALS releases read project settings through the normal LSP
+    # configuration channel. Keep initializationOptions above for compatibility
+    # with older releases, but also configure the active server explicitly.
+    await client.send_notification(
+        "workspace/didChangeConfiguration",
+        {"settings": {"ada": ada_settings}},
+    )
+
     # Open GPR file to trigger project loading and indexing
     if gpr_file and gpr_file.exists():
         logger.debug(f"Opening GPR file: {gpr_file}")
@@ -403,8 +537,7 @@ async def start_als(
 
     # Store configuration for potential restarts
     client._project_root = project_root
-    client._als_path = resolved_als_path
-    client._gpr_file = gpr_file
+    client.set_project_source_baseline(project_root)
 
     return client
 
@@ -414,6 +547,7 @@ async def start_als_with_monitoring(
     als_path: str | None = None,
     gpr_file: Path | None = None,
     on_restart: Callable[["ALSClient"], None] | None = None,
+    project_context: ALSProjectContext | None = None,
 ) -> tuple[ALSClient, ALSHealthMonitor]:
     """
     Start ALS with health monitoring and auto-restart capability.
@@ -423,11 +557,18 @@ async def start_als_with_monitoring(
         als_path: Path to ALS executable
         gpr_file: Path to GPR file
         on_restart: Callback when ALS is restarted
+        project_context: Validated GPR search path and scenario variables
 
     Returns:
         Tuple of (ALSClient, ALSHealthMonitor)
     """
-    client = await start_als(project_root, als_path, gpr_file)
+    effective_context = project_context or resolve_project_context()
+    client = await start_als(
+        project_root,
+        als_path,
+        gpr_file,
+        project_context=effective_context,
+    )
 
     resolved_als_path = als_path or os.environ.get("ALS_PATH", "ada_language_server")
 
@@ -436,6 +577,7 @@ async def start_als_with_monitoring(
         project_root=project_root,
         als_path=resolved_als_path,
         gpr_file=gpr_file,
+        project_context=effective_context,
     )
     monitor.start_monitoring(on_restart=on_restart)
 

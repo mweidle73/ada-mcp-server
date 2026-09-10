@@ -2,10 +2,11 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from ada_mcp.als.process import ALSProjectContext
 from ada_mcp.server import ALSInstance, ALSPool
 
 
@@ -22,6 +23,8 @@ class TestALSInstance:
             client=mock_client,
             monitor=mock_monitor,
             project_root=project_root,
+            project_file=None,
+            project_context=ALSProjectContext(),
             last_used=12345.0,
             lock=asyncio.Lock(),
         )
@@ -29,6 +32,8 @@ class TestALSInstance:
         assert instance.client is mock_client
         assert instance.monitor is mock_monitor
         assert instance.project_root == project_root
+        assert instance.project_file is None
+        assert instance.project_context == ALSProjectContext()
         assert instance.last_used == 12345.0
 
 
@@ -80,7 +85,11 @@ class TestALSPool:
 
             assert client is mock_client
             assert len(pool._instances) == 1
-            assert Path("/test/project") in pool._instances
+            assert (
+                Path("/test/project"),
+                None,
+                ALSProjectContext(),
+            ) in pool._instances
 
     @pytest.mark.asyncio
     async def test_get_client_reuses_instance(self):
@@ -110,6 +119,356 @@ class TestALSPool:
             assert client1 is client2
             # start_als_with_monitoring should only be called once
             assert mock_start.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_get_client_selects_explicit_gpr_for_following_sources(self):
+        """An explicit GPR selects the project view reused by source tools."""
+        pool = ALSPool()
+        client = MagicMock()
+        client.is_running = True
+        monitor = MagicMock()
+        project_root = Path("/test/project")
+        project_file = project_root / "spawn_manager.gpr"
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                return_value=(client, monitor),
+            ) as mock_start,
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=project_root,
+            ),
+        ):
+            selected = await pool.get_client(
+                str(project_file),
+                gpr_file=project_file,
+            )
+            await pool.select_client(selected)
+            reused = await pool.get_client("/test/project/src/spawn-pool.adb")
+
+        assert selected is client
+        assert reused is client
+        mock_start.assert_awaited_once_with(
+            project_root,
+            gpr_file=project_file,
+            project_context=ALSProjectContext(),
+            on_restart=ANY,
+        )
+
+    @pytest.mark.asyncio
+    async def test_same_gpr_with_different_contexts_uses_distinct_clients(
+        self,
+        tmp_path,
+    ):
+        """Search paths are part of the project-view cache identity."""
+        pool = ALSPool()
+        clients = [MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        project_file = project_root / "project.gpr"
+        first_path = tmp_path / "first"
+        second_path = tmp_path / "second"
+        first_path.mkdir()
+        second_path.mkdir()
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[(clients[0], monitor), (clients[1], monitor)],
+            ) as mock_start,
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=project_root,
+            ),
+        ):
+            first = await pool.get_client(
+                str(project_file),
+                gpr_file=project_file,
+                project_paths=[str(first_path)],
+            )
+            second = await pool.get_client(
+                str(project_file),
+                gpr_file=project_file,
+                project_paths=[str(second_path)],
+            )
+
+        assert first is clients[0]
+        assert second is clients[1]
+        assert mock_start.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_pool_logs_omit_scenario_values(self, tmp_path, caplog):
+        """Pool lifecycle logs identify views without exposing scenario values."""
+        caplog.set_level("DEBUG")
+        pool = ALSPool(max_instances=1)
+        clients = [MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        project_file = project_root / "project.gpr"
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[(clients[0], monitor), (clients[1], monitor)],
+            ),
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=project_root,
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await pool.get_client(
+                str(project_file),
+                gpr_file=project_file,
+                scenario_variables={"TOKEN": "sensitive-value"},
+            )
+            await pool.get_client(
+                str(project_file),
+                gpr_file=project_file,
+                scenario_variables={"TOKEN": "replacement-value"},
+            )
+
+        assert "Evicting ALS instance" in caplog.text
+        assert "sensitive-value" not in caplog.text
+        assert "replacement-value" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_explicit_gpr_does_not_reuse_auto_detected_project(self):
+        """A requested GPR must not inherit another view from the same root."""
+        pool = ALSPool()
+        clients = [MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+        project_root = Path("/test/project")
+        project_file = project_root / "spawn_manager.gpr"
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[(clients[0], monitor), (clients[1], monitor)],
+            ) as mock_start,
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=project_root,
+            ),
+        ):
+            automatic = await pool.get_client("/test/project/src/other.adb")
+            selected = await pool.get_client(
+                str(project_file),
+                gpr_file=project_file,
+            )
+            await pool.select_client(selected)
+            reused = await pool.get_client("/test/project/src/spawn-pool.adb")
+
+        assert automatic is clients[0]
+        assert selected is clients[1]
+        assert reused is clients[1]
+        assert mock_start.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_explicit_gpr_selection_survives_lru_eviction(self):
+        """Reload an evicted root with its previously selected GPR file."""
+        pool = ALSPool(max_instances=1)
+        clients = [MagicMock(), MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+        selected_root = Path("/selected")
+        selected_gpr = selected_root / "spawn_manager.gpr"
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[
+                    (clients[0], monitor),
+                    (clients[1], monitor),
+                    (clients[2], monitor),
+                ],
+            ) as mock_start,
+            patch(
+                "ada_mcp.server.find_project_root",
+                side_effect=[selected_root, Path("/other"), selected_root],
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ),
+        ):
+            selected = await pool.get_client(str(selected_gpr), gpr_file=selected_gpr)
+            await pool.select_client(selected)
+            await pool.get_client("/other/src/main.adb")
+            reloaded = await pool.get_client("/selected/src/spawn-pool.adb")
+
+        assert reloaded is clients[2]
+        assert mock_start.await_args.kwargs["gpr_file"] == selected_gpr
+
+    @pytest.mark.asyncio
+    async def test_selected_context_survives_lru_eviction(self, tmp_path):
+        """File tools reload an evicted GPR with its validated environment."""
+        pool = ALSPool(max_instances=1)
+        clients = [MagicMock(), MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+        selected_root = tmp_path / "selected"
+        selected_root.mkdir()
+        selected_gpr = selected_root / "spawn_manager.gpr"
+        dependency_path = tmp_path / "dependency"
+        dependency_path.mkdir()
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[
+                    (clients[0], monitor),
+                    (clients[1], monitor),
+                    (clients[2], monitor),
+                ],
+            ) as mock_start,
+            patch(
+                "ada_mcp.server.find_project_root",
+                side_effect=[selected_root, Path("/other"), selected_root],
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ),
+        ):
+            selected = await pool.get_client(
+                str(selected_gpr),
+                gpr_file=selected_gpr,
+                project_paths=[str(dependency_path)],
+                scenario_variables={"OS": "linux"},
+            )
+            await pool.select_client(selected)
+            await pool.get_client("/other/src/main.adb")
+            reloaded = await pool.get_client("/selected/src/spawn-pool.adb")
+
+        assert reloaded is clients[2]
+        reloaded_context = mock_start.await_args.kwargs["project_context"]
+        assert reloaded_context.project_paths == (dependency_path.resolve(),)
+        assert reloaded_context.scenario_map()["OS"] == "linux"
+
+    @pytest.mark.asyncio
+    async def test_rejected_gpr_preserves_previous_selection(self):
+        """Discarding a new view keeps the last validated project selected."""
+        pool = ALSPool()
+        clients = [MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+        project_root = Path("/test/project")
+        first_gpr = project_root / "first.gpr"
+        rejected_gpr = project_root / "rejected.gpr"
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[(clients[0], monitor), (clients[1], monitor)],
+            ),
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=project_root,
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ),
+        ):
+            selected = await pool.get_client(str(first_gpr), gpr_file=first_gpr)
+            await pool.select_client(selected)
+            rejected = await pool.get_client(
+                str(rejected_gpr),
+                gpr_file=rejected_gpr,
+            )
+            await pool.discard_client(str(rejected_gpr), rejected)
+            reused = await pool.get_client("/test/project/src/main.adb")
+
+        assert reused is clients[0]
+
+    @pytest.mark.asyncio
+    async def test_discard_client_reloads_failed_project_view(self):
+        """A rejected cached client is replaced on the next request."""
+        pool = ALSPool()
+        clients = [MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_running = True
+        monitor = MagicMock()
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                side_effect=[(clients[0], monitor), (clients[1], monitor)],
+            ) as mock_start,
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=Path("/test/project"),
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ) as mock_shutdown,
+        ):
+            first = await pool.get_client("/test/project/abuild.gpr")
+            await pool.discard_client("/test/project/abuild.gpr", first)
+            second = await pool.get_client("/test/project/abuild.gpr")
+
+        assert first is clients[0]
+        assert second is clients[1]
+        assert mock_start.call_count == 2
+        mock_shutdown.assert_awaited_once_with(clients[0], monitor)
+
+    @pytest.mark.asyncio
+    async def test_discard_client_preserves_replacement(self):
+        """A stale request cannot discard a newer monitor replacement."""
+        pool = ALSPool()
+        old_client = MagicMock()
+        new_client = MagicMock()
+        old_client.is_running = True
+        new_client.is_running = True
+        monitor = MagicMock()
+
+        with (
+            patch(
+                "ada_mcp.server.start_als_with_monitoring",
+                new_callable=AsyncMock,
+                return_value=(old_client, monitor),
+            ),
+            patch(
+                "ada_mcp.server.find_project_root",
+                return_value=Path("/test/project"),
+            ),
+            patch(
+                "ada_mcp.server.shutdown_als",
+                new_callable=AsyncMock,
+            ) as mock_shutdown,
+        ):
+            await pool.get_client("/test/project/abuild.gpr")
+            automatic_key = next(iter(pool._instances))
+            pool._instances[automatic_key].client = new_client
+            await pool.discard_client("/test/project/abuild.gpr", old_client)
+
+        assert pool._instances[automatic_key].client is new_client
+        mock_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_get_client_different_projects(self):

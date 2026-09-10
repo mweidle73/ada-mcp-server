@@ -1,7 +1,7 @@
 """Unit tests for Phase 4 & 5: Code Intelligence and Refactoring tools."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -25,6 +25,11 @@ def mock_als_client():
     """Create a mock ALS client."""
     client = AsyncMock()
     client.send_request = AsyncMock()
+    client.send_notification = AsyncMock()
+    client.is_new_project_source = MagicMock(return_value=False)
+    client.is_known_project_source = MagicMock(return_value=False)
+    client.remember_project_source = MagicMock()
+    client.forget_project_source = MagicMock()
     return client
 
 
@@ -32,6 +37,52 @@ def mock_als_client():
 def sample_ada_file():
     """Path to sample Ada file."""
     return Path(__file__).parent / "fixtures" / "sample_project" / "src" / "main.adb"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "arguments", "response"),
+    [
+        (handle_completions, {"line": 1, "column": 1}, None),
+        (handle_signature_help, {"line": 1, "column": 1}, None),
+        (
+            handle_code_actions,
+            {"start_line": 1, "start_column": 1},
+            [],
+        ),
+        (
+            handle_rename_symbol,
+            {
+                "line": 1,
+                "column": 1,
+                "new_name": "Replacement",
+            },
+            None,
+        ),
+        (handle_format_file, {}, None),
+        (handle_get_spec, {"line": 1, "column": 1}, None),
+    ],
+)
+async def test_lsp_refactoring_tools_synchronize_source(
+    mock_als_client,
+    handler,
+    arguments,
+    response,
+):
+    """Every file-based LSP refactoring request synchronizes its source."""
+    mock_als_client.send_request.return_value = response
+
+    with patch(
+        "ada_mcp.tools.refactoring._ensure_file_open",
+        new_callable=AsyncMock,
+    ) as synchronize:
+        await handler(
+            mock_als_client,
+            file="/test/main.adb",
+            **arguments,
+        )
+
+    synchronize.assert_awaited_once_with(mock_als_client, "/test/main.adb")
 
 
 # ============================================================================
@@ -176,6 +227,47 @@ class TestCompletions:
 
 class TestSignatureHelp:
     """Tests for ada_signature_help tool."""
+
+    @pytest.mark.asyncio
+    async def test_signature_help_opens_cold_document(
+        self,
+        tmp_path,
+        mock_als_client,
+    ):
+        """Signature help synchronizes a document before its first request."""
+        source = tmp_path / "sample.adb"
+        source.write_text("procedure Sample is\nbegin\n   Add (1, 2);\nend Sample;\n")
+        events = []
+
+        async def record_notification(method, _params):
+            events.append(method)
+
+        async def record_request(method, _params):
+            events.append(method)
+            return {
+                "signatures": [
+                    {
+                        "label": "Add (A : Integer; B : Integer)",
+                        "parameters": [],
+                    }
+                ]
+            }
+
+        mock_als_client.send_notification.side_effect = record_notification
+        mock_als_client.send_request.side_effect = record_request
+
+        result = await handle_signature_help(
+            mock_als_client,
+            str(source),
+            line=3,
+            column=11,
+        )
+
+        assert result["found"] is True
+        assert events == [
+            "textDocument/didOpen",
+            "textDocument/signatureHelp",
+        ]
 
     @pytest.mark.asyncio
     async def test_signature_help_basic(self, mock_als_client):
@@ -361,6 +453,7 @@ class TestCodeActions:
         call_args = mock_als_client.send_request.call_args
         assert call_args[0][1]["range"]["start"]["line"] == 4  # 0-based
         assert call_args[0][1]["range"]["end"]["line"] == 9  # 0-based
+        assert call_args[0][1]["context"] == {"diagnostics": []}
 
         assert result["count"] == 1
 
@@ -542,6 +635,60 @@ class TestRenameSymbol:
         assert result["new_name"] == "New_Name"
         assert result["total_changes"] == 2
         assert result["files_affected"] == 2
+
+    @pytest.mark.asyncio
+    async def test_rename_range_reports_exact_old_text(self, tmp_path, mock_als_client):
+        """A prepareRename range supplies exact names even without a placeholder."""
+        source = tmp_path / "sample.adb"
+        source.write_text(
+            "procedure Sample is\n"
+            "   Old_Name : Integer := 1;\n"
+            "begin\n"
+            "   old_name := Old_Name + 1;\n"
+            "end Sample;\n"
+        )
+        uri = source.resolve().as_uri()
+        mock_als_client.send_request.side_effect = [
+            {
+                "start": {"line": 1, "character": 3},
+                "end": {"line": 1, "character": 11},
+            },
+            {
+                "changes": {
+                    uri: [
+                        {
+                            "range": {
+                                "start": {"line": 1, "character": 3},
+                                "end": {"line": 1, "character": 11},
+                            },
+                            "newText": "New_Name",
+                        },
+                        {
+                            "range": {
+                                "start": {"line": 3, "character": 3},
+                                "end": {"line": 3, "character": 11},
+                            },
+                            "newText": "New_Name",
+                        },
+                    ]
+                }
+            },
+        ]
+
+        result = await handle_rename_symbol(
+            mock_als_client,
+            str(source),
+            line=2,
+            column=4,
+            new_name="New_Name",
+        )
+
+        assert result["success"] is True
+        assert result["old_name"] == "Old_Name"
+        assert [change["old_text"] for change in result["changes"]] == [
+            "Old_Name",
+            "old_name",
+        ]
 
     @pytest.mark.asyncio
     async def test_rename_invalid_identifier(self, mock_als_client):
