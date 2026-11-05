@@ -25,6 +25,13 @@ def main() -> None:
     logger.info("Starting Ada MCP Server...")
 
     try:
+        from ada_mcp.als.process import get_project_scenario_variables
+
+        # Validate process-wide ALS configuration before accepting MCP calls.
+        # Otherwise a malformed value looks like a later language-server
+        # failure when the first file lazily creates an ALS client.
+        get_project_scenario_variables()
+
         from ada_mcp.server import run_server
 
         asyncio.run(run_server())

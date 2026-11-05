@@ -141,7 +141,7 @@ python -m ada_mcp
 | Tool | Description |
 |------|-------------|
 | `ada_document_symbols` | List all symbols in a file (outline) |
-| `ada_workspace_symbols` | Search symbols across workspace |
+| `ada_workspace_symbols` | Search symbols in the project containing an anchor file |
 
 ### Diagnostics & Build
 
@@ -163,7 +163,7 @@ python -m ada_mcp
 
 | Tool | Description |
 |------|-------------|
-| `ada_project_info` | Get project structure info |
+| `ada_project_info` | Select and inspect an exact GPR project view |
 | `ada_call_hierarchy` | Get incoming/outgoing calls |
 | `ada_dependency_graph` | Get package dependencies |
 
@@ -306,6 +306,20 @@ Get all symbols in a file (outline view).
 }
 ```
 
+### ada_workspace_symbols
+
+Search the evaluated project that contains the supplied anchor file. The file
+selects the correct ALS instance in multi-project workspaces.
+
+```json
+{
+  "file": "/project/src/main.adb",
+  "query": "Process_Data",
+  "kind": "all",
+  "limit": 50
+}
+```
+
 ### ada_completions
 
 Get context-aware code completions.
@@ -392,21 +406,38 @@ Build the project with GPRbuild.
 
 ### ada_project_info
 
-Get project structure information.
+Select an exact GPR project and return its evaluated structure. Later
+file-based tools below the same project root reuse this view until another GPR
+project is selected and validated. Projects which rely on build-orchestrator
+state may also provide their ordered GPR search directories and scenario
+variables. The search directories replace the inherited `GPR_PROJECT_PATH`;
+scenario entries override the server's configured defaults for this view.
 
 ```json
-{}
+{
+  "gpr_file": "/project/project.gpr",
+  "project_paths": ["/project/dependencies/anet"],
+  "scenario_variables": {
+    "OS": "linux",
+    "TARGET_ARCH": "x86_64"
+  }
+}
 ```
+
+The validated project file, search path and effective scenario map form one
+cached view. An automatic ALS restart and later file-based tools therefore
+cannot silently fall back to another worktree's dependency or scenario.
 
 **Response:**
 ```json
 {
-  "projectFile": "/project/project.gpr",
-  "projectName": "My_Project",
-  "sourceDirs": ["/project/src"],
-  "objectDir": "/project/obj",
-  "execDir": "/project/bin",
-  "mainUnits": ["main.adb"]
+  "project_file": "/project/project.gpr",
+  "project_name": "My_Project",
+  "source_dirs": ["/project/src"],
+  "object_dir": "/project/obj",
+  "exec_dir": "/project/bin",
+  "main_units": ["main.adb"],
+  "complete": true
 }
 ```
 
@@ -504,10 +535,17 @@ Get call relationships for a subprogram.
 |----------|---------|-------------|
 | `ALS_PATH` | `ada_language_server` | Path to ALS executable |
 | `ADA_PROJECT_FILE` | Auto-detect | GPR project file path |
+| `ADA_PROJECT_SCENARIO_VARIABLES` | `{}` | JSON object of ALS scenario variables |
 | `ADA_PROJECT_ROOT` | Current directory | Project root directory |
 | `ADA_MCP_LOG_LEVEL` | `INFO` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) |
 | `ADA_MCP_TIMEOUT` | `30` | Request timeout in seconds |
 | `ADA_MCP_CACHE_TTL` | `5` | Cache time-to-live in seconds |
+
+Scenario-variable values are forwarded to ALS but are deliberately omitted
+from logs. Only their names are logged, so build-mode selections can be
+diagnosed without exposing values that may be sensitive in another project.
+Per-view values supplied to `ada_project_info` override matching entries from
+`ADA_PROJECT_SCENARIO_VARIABLES` without modifying the server environment.
 
 ### Logging
 

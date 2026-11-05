@@ -3,13 +3,14 @@
 import asyncio
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Generic, ParamSpec, TypeVar
+from typing import Any, Generic, ParamSpec, TypeVar, cast
 
 logger = logging.getLogger(__name__)
 
@@ -106,17 +107,18 @@ class TTLCache(Generic[T]):
                 value=value, expires_at=time.monotonic() + self.ttl_seconds
             )
 
-    async def get_or_set(self, key: str, factory: Callable[[], Any]) -> T:
+    async def get_or_set(self, key: str, factory: Callable[[], T | Awaitable[T]]) -> T:
         """Get cached value or compute and cache it."""
         cached = await self.get(key)
         if cached is not None:
             return cached
 
         # Compute value
-        if asyncio.iscoroutinefunction(factory):
-            value = await factory()
+        candidate = factory()
+        if inspect.isawaitable(candidate):
+            value = await cast(Awaitable[T], candidate)
         else:
-            value = factory()
+            value = candidate
 
         await self.set(key, value)
         return value

@@ -1,7 +1,7 @@
 """Error handling utilities for Ada MCP Server."""
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -38,7 +38,7 @@ def safe_tool_handler(
         Decorated function with error handling
     """
 
-    def decorator(func: Callable[P, T]) -> Callable[P, T]:
+    def decorator(func: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
         @wraps(func)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             try:
@@ -57,9 +57,9 @@ def safe_tool_handler(
                 logger.exception(f"Unexpected error in {func.__name__}: {e}")
                 return fallback_factory()
 
-        return wrapper  # type: ignore
+        return wrapper
 
-    return decorator
+    return decorator  # type: ignore[return-value]
 
 
 def format_error_response(error: str, details: str | None = None) -> dict[str, Any]:

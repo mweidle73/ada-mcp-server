@@ -1,7 +1,7 @@
 """Pytest configuration and fixtures for Ada MCP Server tests."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -18,6 +18,10 @@ def mock_als_client() -> AsyncMock:
     client = AsyncMock()
     client.send_request = AsyncMock()
     client.send_notification = AsyncMock()
+    client.is_new_project_source = MagicMock(return_value=False)
+    client.is_known_project_source = MagicMock(return_value=False)
+    client.remember_project_source = MagicMock()
+    client.forget_project_source = MagicMock()
     return client
 
 

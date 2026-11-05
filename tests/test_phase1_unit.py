@@ -28,6 +28,10 @@ def mock_als_client():
     import asyncio
     client = AsyncMock()
     client.send_request = AsyncMock()
+    client.is_new_project_source = MagicMock(return_value=False)
+    client.is_known_project_source = MagicMock(return_value=False)
+    client.remember_project_source = MagicMock()
+    client.forget_project_source = MagicMock()
     # Properties used by diagnostics handler
     client._diagnostics = {}
     client._diagnostics_lock = asyncio.Lock()

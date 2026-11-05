@@ -249,6 +249,7 @@ async def run_integration_tests() -> bool:
         # Test workspace_symbols
         print("\n[8] Testing ada_workspace_symbols...")
         result = await call_tool(client, "ada_workspace_symbols", {
+            "file": str(test_file),
             "query": "Add",
             "kind": "all",
             "limit": 10,
